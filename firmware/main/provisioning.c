@@ -270,7 +270,8 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
     form_get(body, "custom", custom, sizeof(custom));
     form_get(body, "pass", pass, sizeof(pass));
     if (custom[0]) {
-        strncpy(ssid, custom, sizeof(ssid) - 1);
+        memcpy(ssid, custom, sizeof(ssid) - 1);
+        ssid[sizeof(ssid) - 1] = '\0';
     }
     if (!ssid[0]) {
         set_status_msg("Please select or enter an SSID.");
@@ -306,7 +307,8 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
             return ESP_OK;
         }
         s_cfg->active = (uint8_t)idx;
-        strncpy(s_cfg->profiles[idx].password, pass, CFG_PASS_MAX - 1);
+        memcpy(s_cfg->profiles[idx].password, pass, CFG_PASS_MAX - 1);
+        s_cfg->profiles[idx].password[CFG_PASS_MAX - 1] = '\0';
         config_save(s_cfg);
         s_phase = PROV_PHASE_SUCCESS;
         set_status_msg("Connected — saving and closing setup network…");

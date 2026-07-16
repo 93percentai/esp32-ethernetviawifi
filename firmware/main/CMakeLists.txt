@@ -17,6 +17,8 @@ idf_component_register(
         esp_timer
         esp_http_server
         driver
+        esp_driver_gpio
+        esp_driver_spi
         esp_lcd
         esp_lcd_st7735
         espressif__esp_tinyusb
