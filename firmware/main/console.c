@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "provisioning.h"
 #include "tinyusb.h"
 #include "tusb_cdc_acm.h"
 #include "wifi_mgr.h"
@@ -49,6 +50,7 @@ static const char *state_str(wifi_mgr_state_t s)
     case WIFI_MGR_NO_AP: return "no AP found";
     case WIFI_MGR_BAD_AUTH: return "bad auth";
     case WIFI_MGR_SCANNING: return "scanning";
+    case WIFI_MGR_PROVISIONING: return "softap portal";
     default: return "?";
     }
 }
@@ -105,7 +107,10 @@ static void cmd_help(void)
         "  save                persist profiles to NVS\r\n"
         "  status              show link + traffic stats\r\n"
         "  resetstats          clear byte/frame counters\r\n"
-        "  help                this text\r\n");
+        "  help                this text\r\n"
+        "\r\n"
+        "With no SSID, SoftAP '%s' + http://192.168.1.1 is also available.\r\n",
+        PROV_SOFTAP_SSID);
 }
 
 static wifi_scan_result_t s_scan[24];
@@ -114,7 +119,7 @@ static int s_scan_count;
 static void cmd_scan(void)
 {
     console_printf("[*] scanning...\r\n");
-    s_scan_count = wifi_mgr_scan(s_scan, 24);
+    s_scan_count = wifi_mgr_scan(s_scan, 24, !provisioning_is_active());
     console_printf("  networks (%d):\r\n", s_scan_count);
     for (int i = 0; i < s_scan_count; i++) {
         console_printf("   %2d  %-24s  %4d dBm  %02x:%02x:%02x:%02x:%02x:%02x\r\n",
@@ -181,7 +186,7 @@ static void handle_line(char *line)
                 s_cfg->profiles[idx].password[0] = '\0';
                 console_printf("[*] staged '%s' — set pass <password> then save\r\n",
                                s_scan[n - 1].ssid);
-                wifi_mgr_apply(s_cfg);
+                provisioning_apply_or_start(s_cfg);
             }
         }
     } else if (strcmp(cmd, "list") == 0) {
@@ -200,7 +205,7 @@ static void handle_line(char *line)
         } else {
             s_cfg->active = (uint8_t)(n - 1);
             console_printf("[*] applying — re-associating\r\n");
-            wifi_mgr_apply(s_cfg);
+            provisioning_apply_or_start(s_cfg);
         }
     } else if (strcmp(cmd, "del") == 0) {
         int n = atoi(rest);
@@ -208,7 +213,7 @@ static void handle_line(char *line)
             console_printf("[!] del <1..%u>\r\n", s_cfg->profile_count);
         } else {
             config_del_profile(s_cfg, n - 1);
-            wifi_mgr_apply(s_cfg);
+            provisioning_apply_or_start(s_cfg);
             console_printf("[*] deleted\r\n");
         }
     } else if (strcmp(cmd, "save") == 0) {
@@ -236,12 +241,12 @@ static void handle_line(char *line)
             ensure_active_profile();
             strncpy(s_cfg->profiles[s_cfg->active].ssid, val, CFG_SSID_MAX - 1);
             console_printf("[*] applying — re-associating\r\n");
-            wifi_mgr_apply(s_cfg);
+            provisioning_apply_or_start(s_cfg);
         } else if (strcmp(key, "pass") == 0) {
             ensure_active_profile();
             strncpy(s_cfg->profiles[s_cfg->active].password, val, CFG_PASS_MAX - 1);
             console_printf("[*] applying — re-associating\r\n");
-            wifi_mgr_apply(s_cfg);
+            provisioning_apply_or_start(s_cfg);
         } else {
             console_printf("[!] set ssid|pass <value>\r\n");
         }

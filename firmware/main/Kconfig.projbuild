@@ -4,8 +4,9 @@ menu "USB Wi-Fi Bridge Configuration"
         string "Default WiFi SSID (optional compile-time seed)"
         default ""
         help
-            Optional SSID baked into the firmware. Leave empty and provision
-            at runtime over the USB CDC management console (set ssid / set pass / save).
+            Optional SSID baked into the firmware. Leave empty to provision at
+            runtime: SoftAP captive portal (ESP_WIFITOUSB_CONF → http://192.168.1.1)
+            or the USB CDC management console (set ssid / set pass / save).
 
     config BRIDGE_WIFI_PASSWORD
         string "Default WiFi Password"

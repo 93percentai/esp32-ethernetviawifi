@@ -18,7 +18,8 @@ No host-side Wi-Fi stack, vendor driver, or `wpa_supplicant` is required — onl
 - Transparent **layer-2** USB ↔ Wi-Fi bridge (MAC adoption, no NAT)
 - USB **CDC-NCM** network interface + **CDC-ACM** management console
 - Up to 8 saved Wi-Fi credential profiles in NVS
-- Site scan / join from the serial console
+- **SoftAP captive portal** when unconfigured: scans nearby SSIDs, broadcasts `ESP_WIFITOUSB_CONF`, config UI at `http://192.168.1.1`
+- Site scan / join from the serial console (alternate provisioning path)
 - **ST7735 LCD** live status: link state, SSID, RSSI, download/upload totals and rates
 - **APA102** status LED (association / error patterns)
 - Built with ESP-IDF 5.4 + Espressif TinyUSB (`esp_tinyusb`)
@@ -63,7 +64,15 @@ idf.py -p /dev/ttyACM0 flash   # port name varies
 
 ### 4. Provision Wi-Fi
 
-Open the CDC-ACM console (often `/dev/ttyACM0` on Linux, a COM port on Windows):
+**Option A — SoftAP captive portal (default when no SSID is saved)**
+
+1. The stick scans nearby networks, then broadcasts open Wi‑Fi **`ESP_WIFITOUSB_CONF`**
+2. Join that network from a phone/laptop
+3. Open **`http://192.168.1.1`** (captive portal / DNS redirect)
+4. Pick an SSID, enter the password, tap **Test & Save**
+5. On a successful association test, credentials are stored in NVS and the setup SoftAP stops
+
+**Option B — USB CDC console**
 
 ```text
 picocom /dev/ttyACM0
@@ -82,11 +91,11 @@ The host gets a USB Ethernet interface. NetworkManager / `systemd-networkd` / Wi
 
 | Field | Meaning |
 |-------|---------|
-| LINK | `CONNECTED` / `ASSOCIATING` / `NO CONFIG` / `BAD AUTH` / … |
-| SSID | Active network name |
-| RSSI | Signal strength when associated |
-| DN | Bytes + rate Wi-Fi → host (download) |
-| UP | Bytes + rate host → Wi-Fi (upload) |
+| LINK | `CONNECTED` / `ASSOCIATING` / `SETUP AP` / `SCANNING` / `TESTING` / … |
+| SSID / AP | Active network, or SoftAP name `ESP_WIFITOUSB_CONF` in setup mode |
+| RSSI / URL | Signal when associated; portal IP `192.168.1.1` in setup mode |
+| DN / STA | Download stats, or portal client / phase status in setup mode |
+| UP / NET | Upload stats, or nearby-SSID count in setup mode |
 
 ## Documentation
 
@@ -101,8 +110,9 @@ The host gets a USB Ethernet interface. NetworkManager / `systemd-networkd` / Wi
 
 ```
 firmware/                 ESP-IDF application
-  main/                   Bridge, Wi-Fi, console, LCD, LED
+  main/                   Bridge, Wi-Fi, SoftAP portal, console, LCD, LED
   components/esp_lcd_st7735/   LilyGO-proven ST7735 panel driver
+  components/dns_server/       Captive-portal DNS redirect
 docs/                     Architecture and setup guides
 ```
 

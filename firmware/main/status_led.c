@@ -85,6 +85,11 @@ static void led_task(void *arg)
             apa102_write((tick & 1) ? 8 : 0, 0, 20, 48);
             vTaskDelay(pdMS_TO_TICKS(150));
             break;
+        case WIFI_MGR_PROVISIONING:
+            /* Magenta pulse = join SoftAP and open portal */
+            apa102_write((tick & 1) ? 8 : 0, 40, 0, 40);
+            vTaskDelay(pdMS_TO_TICKS(350));
+            break;
         case WIFI_MGR_BAD_AUTH:
         case WIFI_MGR_NO_AP:
             apa102_write((tick & 1) ? 10 : 0, 48, 0, 0);
