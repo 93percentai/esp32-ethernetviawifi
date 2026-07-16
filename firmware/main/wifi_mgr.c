@@ -113,7 +113,9 @@ esp_err_t wifi_mgr_init(bridge_config_t *cfg)
              s_sta_mac[0], s_sta_mac[1], s_sta_mac[2],
              s_sta_mac[3], s_sta_mac[4], s_sta_mac[5]);
 
-    return wifi_mgr_apply(cfg);
+    /* Association is deferred until USB NCM is up (see app_main). */
+    (void)cfg;
+    return ESP_OK;
 }
 
 esp_err_t wifi_mgr_apply(const bridge_config_t *cfg)
@@ -134,10 +136,15 @@ esp_err_t wifi_mgr_apply(const bridge_config_t *cfg)
     wifi_config_t wifi_config = {0};
     strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
     strncpy((char *)wifi_config.sta.password, pass, sizeof(wifi_config.sta.password) - 1);
-    wifi_config.sta.threshold.authmode = pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-    /* Prefer WPA2/WPA3 transition when a password is set */
-    wifi_config.sta.pmf_cfg.capable = true;
-    wifi_config.sta.pmf_cfg.required = false;
+    /* Match pico-usb-wifi: open or WPA2/WPA3-SAE transition */
+    if (pass[0]) {
+        wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+        wifi_config.sta.pmf_cfg.capable = true;
+        wifi_config.sta.pmf_cfg.required = false;
+        wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    } else {
+        wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    }
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     strncpy(s_status.ssid, ssid, sizeof(s_status.ssid) - 1);

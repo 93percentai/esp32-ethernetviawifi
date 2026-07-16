@@ -105,7 +105,11 @@ Unlike the Pico’s single main-loop TinyUSB constraint, Espressif’s `esp_tiny
 | `lcd` | ST7735 redraw @ 2 Hz | CPU1 |
 | `led` | APA102 patterns | any |
 
-`tinyusb_net_send_sync` is used from the Wi-Fi RX callback with a short timeout so a stalled USB host cannot exhaust Wi-Fi buffers indefinitely; failures increment `drop_rx`.
+`tinyusb_net_send_sync` is used from the Wi-Fi RX callback with a 100 ms timeout (same as Espressif `sta2eth`) so a stalled USB host cannot exhaust Wi-Fi buffers indefinitely; failures increment `drop_rx`.
+
+### NCM link state
+
+After `tinyusb_net_init`, the firmware forces **NCM link down**, then calls `tud_network_link_state(0, true)` only when the STA associates (and `false` on disconnect). This matches Espressif’s updated `tusb_ncm` example and the Apple NCM DHCP fix ([IDFGH-17035](https://github.com/espressif/esp-idf/issues/18079)): hosts that DHCP only on the CDC `NETWORK_CONNECTION` notification otherwise race an unready bridge.
 
 ## Configuration storage
 

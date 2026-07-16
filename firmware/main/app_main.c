@@ -39,11 +39,17 @@ void app_main(void)
     ESP_ERROR_CHECK(display_init());
     ESP_ERROR_CHECK(status_led_init());
 
-    /* Wi-Fi first so we know the STA MAC for USB NCM adoption */
+    /*
+     * Order matches Espressif tusb_ncm / sta2eth USB path:
+     * 1) start Wi-Fi driver (MAC known, no associate yet)
+     * 2) bring up USB NCM with that MAC, link forced down
+     * 3) CDC console
+     * 4) then associate — link-up notifies the host when the bridge is ready
+     */
     ESP_ERROR_CHECK(wifi_mgr_init(&cfg));
-
     ESP_ERROR_CHECK(bridge_init(wifi_mgr_sta_mac()));
     ESP_ERROR_CHECK(console_init(&cfg));
+    ESP_ERROR_CHECK(wifi_mgr_apply(&cfg));
 
     display_task_start();
     status_led_task_start();

@@ -113,16 +113,52 @@ Forum/docs occasionally mention RF / PHY interactions when USB is active. In pra
 | Bridging | Raw L2 (`esp_wifi_internal_*`) | Same semantics as pico / `tusb_ncm` |
 | Not chosen | SoftAP captive portal (`sta2eth`) | Serial console is enough for a USB stick |
 
-## 6. Known gaps / future work
+## 6. Audit against peer projects (follow-up review)
+
+Projects re-checked with source-level comparison:
+
+| Project | Class | Architecture | Credential UX | Relevant to us |
+|---------|-------|--------------|---------------|----------------|
+| [pico-usb-wifi](https://gitlab.com/baiyibai/pico-usb-wifi) | CDC-NCM | L2 + MAC adoption + reflection filter | CDC console + multi-profile | Design target |
+| [esp-idf `tusb_ncm`](https://github.com/espressif/esp-idf/tree/master/examples/peripherals/usb/device/tusb_ncm) | CDC-NCM | L2 via `esp_wifi_internal_*` | menuconfig SSID | Data path template |
+| [esp-idf `sta2eth`](https://github.com/espressif/esp-idf/tree/v5.5.3/examples/network/sta2eth) | USB-NCM or ETH | L2 forwarder; USB `mac_spoof()` is a **no-op** (comment: set STA MAC = NCM MAC) | SoftAP / webpage / button | Confirms MAC adoption for USB |
+| [esp-iot-solution `usb_dongle`](https://github.com/espressif/esp-iot-solution/tree/master/examples/usb/device/usb_dongle) | ECM/RNDIS (+CDC) | USB net + Wi-Fi STA | FreeRTOS-CLI `sta` | Composite CDC+net pattern |
+| [ThingPulse pendrive-s3-wifi-dongle](https://github.com/ThingPulse/esp32-pendrive-s3-wifi-dongle) | RNDIS+CDC (defaults) | Fork of usb_dongle | CLI | Same stick form-factor family |
+| [Svarkovsky/esp32-usb-wifi-dongle-auto](https://github.com/Svarkovsky/esp32-usb-wifi-dongle-auto) | usb_dongle-based | Auto SmartConfig + LED | ESP-Touch | Autoprovision idea |
+| [esp32-taplink](https://github.com/davidliyutong/esp32-taplink) | CDC-NCM | **L3 NAT** SoftAP↔USB (explicitly not L2) | Web UI | Contrasting architecture |
+| [martin-ger eth↔WiFi bridge](https://github.com/martin-ger/esp32_eth_wifi_bridge) | ETH↔AP L2 | Different topology (AP side) | Web/NVS | L2 philosophy |
+| [IDFGH-15639](https://github.com/espressif/esp-idf/issues/15639) | — | lwIP bridge + USB-NCM broken/awkward | — | Avoid lwIP bridge glue |
+| [IDFGH-17035](https://github.com/espressif/esp-idf/issues/18079) | NCM | Need `tud_network_link_state` tied to Wi-Fi | — | **Fix applied** |
+
+### Findings applied to this firmware
+
+1. **NCM link state (was missing)** — Drive `tud_network_link_state(0, up/down)` from Wi-Fi associate/disconnect; force **down** right after `tinyusb_net_init`. Matches updated `tusb_ncm` and Apple DHCP timing fix.
+2. **Init order** — Start Wi-Fi driver → USB NCM (link down) → CDC console → then `wifi_mgr_apply()` associate. Prevents arming the bridge before TinyUSB is ready.
+3. **USB TX timeout** — Raised Wi-Fi→USB `tinyusb_net_send_sync` timeout from 20 ms to **100 ms** (sta2eth value) to reduce DHCP/drop under USB FS load.
+4. **MAC handling confirmed correct** — `sta2eth` USB path documents that frame rewriting is unnecessary when NCM MAC == STA MAC; empty `mac_spoof()` there. Same as pico / `tusb_ncm` / us.
+5. **Do not use lwIP IEEE bridge for this** — IDF issue 15639 and peer notes: raw `esp_wifi_internal_*` is the proven STA↔USB path.
+6. **WPA2/WPA3 transition** — Enabled SAE PWE both + PMF capable, aligned with pico-usb-wifi’s transition-mode intent.
+7. **Composite CDC+NCM** — Supported by `esp_tinyusb` default descriptors (`usb_descriptors.c` concatenates CDC + NCM); ThingPulse/usb_dongle use the same pattern with RNDIS/ECM.
+
+### Deliberately not copied
+
+| Peer feature | Why skipped (for now) |
+|--------------|------------------------|
+| SoftAP captive portal (`sta2eth`) | CDC console + LCD enough for a USB stick; can add later |
+| SmartConfig (Svarkovsky) | Optional; phone-dependent |
+| RNDIS default (ThingPulse) | NCM is the cross-platform choice pico made |
+| L3 NAT SoftAP (taplink) | Different product (OOB management), not a Wi-Fi NIC |
+
+## 7. Known gaps / future work
 
 - IPv6 multicast completeness vs pico’s `allmulti` (may need explicit multicast filter API work)
 - Second CDC debug stream (optional)
 - Throughput tuning (NTB sizes, Wi-Fi AMPDU, pinned cores) — USB FS remains the ceiling
-- Captive SoftAP fallback for headless provisioning without a serial terminal
+- Captive SoftAP / SmartConfig fallback for headless provisioning without a serial terminal
 - Validate on no-LCD / Dual / Plus board variants
 - Encrypted NVS for credential-at-rest
 
-## 7. References
+## 8. References
 
 1. https://gitlab.com/baiyibai/pico-usb-wifi  
 2. https://github.com/espressif/esp-idf/tree/v5.4.2/examples/peripherals/usb/device/tusb_ncm  
@@ -133,3 +169,8 @@ Forum/docs occasionally mention RF / PHY interactions when USB is active. In pra
 7. https://wiki.lilygo.cc/products/t-dongle-series/t-dongle-s3/  
 8. https://docs.zephyrproject.org/latest/boards/lilygo/tdongle_s3/doc/index.html  
 9. https://github.com/esphome/esphome-devices (Lilygo-TDongle-S3 profile)  
+10. https://github.com/ThingPulse/esp32-pendrive-s3-wifi-dongle  
+11. https://github.com/Svarkovsky/esp32-usb-wifi-dongle-auto  
+12. https://github.com/davidliyutong/esp32-taplink  
+13. https://github.com/espressif/esp-idf/issues/15639  
+14. https://github.com/espressif/esp-idf/issues/18079  

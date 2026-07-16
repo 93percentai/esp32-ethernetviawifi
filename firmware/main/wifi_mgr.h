@@ -32,7 +32,9 @@ typedef struct {
     uint8_t bssid[6];
 } wifi_scan_result_t;
 
+/* Start Wi-Fi driver and learn STA MAC; does not associate yet. */
 esp_err_t wifi_mgr_init(bridge_config_t *cfg);
+/* Apply active profile and (re)associate. Call after USB bridge is ready. */
 esp_err_t wifi_mgr_apply(const bridge_config_t *cfg);
 void wifi_mgr_get_status(wifi_mgr_status_t *out);
 bool wifi_mgr_is_connected(void);

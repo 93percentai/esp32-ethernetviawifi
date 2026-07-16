@@ -10,6 +10,7 @@
 #include "esp_private/wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "class/net/net_device.h"
 #include "tinyusb.h"
 #include "tinyusb_net.h"
 
@@ -104,7 +105,8 @@ static esp_err_t pkt_wifi2usb(void *buffer, uint16_t len, void *eb)
         return ESP_OK;
     }
 
-    if (tinyusb_net_send_sync(buffer, len, eb, pdMS_TO_TICKS(20)) != ESP_OK) {
+    /* sta2eth uses 100 ms; too-short timeouts drop DHCP bursts under USB FS load */
+    if (tinyusb_net_send_sync(buffer, len, eb, pdMS_TO_TICKS(100)) != ESP_OK) {
         esp_wifi_internal_free_rx_buffer(eb);
         stats_lock();
         s_stats.drop_rx++;
@@ -152,6 +154,14 @@ esp_err_t bridge_init(const uint8_t sta_mac[6])
              sta_mac[0], sta_mac[1], sta_mac[2], sta_mac[3], sta_mac[4], sta_mac[5]);
 
     ESP_RETURN_ON_ERROR(tinyusb_net_init(TINYUSB_USBDEV_0, &net_config), TAG, "NCM init failed");
+
+    /*
+     * Keep NCM link down until Wi-Fi associates. Espressif's updated tusb_ncm
+     * example and IDFGH-17035 (Apple NCM DHCP) require this: hosts that DHCP
+     * only on the NETWORK_CONNECTION notification otherwise race the bridge.
+     */
+    tud_network_link_state(0, false);
+    s_wifi_up = false;
     return ESP_OK;
 }
 
@@ -159,10 +169,15 @@ void bridge_set_wifi_up(bool up)
 {
     if (up && !s_wifi_up) {
         esp_wifi_internal_reg_rxcb(ESP_IF_WIFI_STA, pkt_wifi2usb);
-        ESP_LOGI(TAG, "L2 bridge armed (wifi→usb)");
+        tud_network_link_state(0, true);
+        ESP_LOGI(TAG, "L2 bridge armed (wifi→usb), NCM link up");
     } else if (!up && s_wifi_up) {
         esp_wifi_internal_reg_rxcb(ESP_IF_WIFI_STA, NULL);
-        ESP_LOGI(TAG, "L2 bridge disarmed");
+        tud_network_link_state(0, false);
+        ESP_LOGI(TAG, "L2 bridge disarmed, NCM link down");
+    } else if (!up) {
+        /* Idempotent down (e.g. before first association) */
+        tud_network_link_state(0, false);
     }
     s_wifi_up = up;
 }
