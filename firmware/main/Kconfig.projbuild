@@ -1,0 +1,28 @@
+menu "USB Wi-Fi Bridge Configuration"
+
+    config BRIDGE_WIFI_SSID
+        string "Default WiFi SSID (optional compile-time seed)"
+        default ""
+        help
+            Optional SSID baked into the firmware. Leave empty and provision
+            at runtime over the USB CDC management console (set ssid / set pass / save).
+
+    config BRIDGE_WIFI_PASSWORD
+        string "Default WiFi Password"
+        default ""
+        help
+            Optional WPA2/WPA3 passphrase for the compile-time default SSID.
+
+    config BRIDGE_LCD_ENABLED
+        bool "Enable ST7735 status LCD (T-Dongle-S3 with screen)"
+        default y
+        help
+            Drive the 0.96" ST7735 IPS panel with Wi-Fi and traffic stats.
+
+    config BRIDGE_STATUS_LED
+        bool "Enable APA102 status LED"
+        default y
+        help
+            Use the on-board APA102 RGB LED for association state.
+
+endmenu
