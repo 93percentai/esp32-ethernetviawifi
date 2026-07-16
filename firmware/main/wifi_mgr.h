@@ -14,6 +14,7 @@ typedef enum {
     WIFI_MGR_NO_AP,
     WIFI_MGR_BAD_AUTH,
     WIFI_MGR_SCANNING,
+    WIFI_MGR_PROVISIONING,
 } wifi_mgr_state_t;
 
 typedef struct {
@@ -40,5 +41,22 @@ void wifi_mgr_get_status(wifi_mgr_status_t *out);
 bool wifi_mgr_is_connected(void);
 const uint8_t *wifi_mgr_sta_mac(void);
 
-/* Blocking multi-pass scan; returns count written into out[] (max max_out). */
-int wifi_mgr_scan(wifi_scan_result_t *out, int max_out);
+/* When true, association events do not toggle the USB NCM link. */
+void wifi_mgr_set_suppress_bridge(bool suppress);
+
+/* Force a status label (used while SoftAP captive portal is up). */
+void wifi_mgr_set_state(wifi_mgr_state_t state);
+
+/*
+ * Blocking scan. If reassociate is true, restores the previous association
+ * attempt afterward (normal console scan). If false, leaves radio alone.
+ * Returns count written into out[] (max max_out).
+ */
+int wifi_mgr_scan(wifi_scan_result_t *out, int max_out, bool reassociate);
+
+/*
+ * Configure STA credentials and wait for association (or failure).
+ * Used by SoftAP provisioning to test a network before saving.
+ * Returns ESP_OK on association, ESP_ERR_TIMEOUT / ESP_FAIL otherwise.
+ */
+esp_err_t wifi_mgr_test_connect(const char *ssid, const char *pass, int timeout_ms);

@@ -15,6 +15,7 @@
 #include "font8x8.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "provisioning.h"
 #include "sdkconfig.h"
 #include "wifi_mgr.h"
 
@@ -108,6 +109,7 @@ static const char *link_label(wifi_mgr_state_t s)
     case WIFI_MGR_NO_AP: return "NO AP";
     case WIFI_MGR_BAD_AUTH: return "BAD AUTH";
     case WIFI_MGR_SCANNING: return "SCANNING";
+    case WIFI_MGR_PROVISIONING: return "SETUP AP";
     default: return "?";
     }
 }
@@ -118,6 +120,7 @@ static uint16_t link_color(wifi_mgr_state_t s)
     case WIFI_MGR_CONNECTED: return COLOR_OK;
     case WIFI_MGR_CONNECTING:
     case WIFI_MGR_SCANNING:
+    case WIFI_MGR_PROVISIONING:
     case WIFI_MGR_DISCONNECTED: return COLOR_WARN;
     case WIFI_MGR_BAD_AUTH:
     case WIFI_MGR_NO_AP: return COLOR_ERR;
@@ -142,17 +145,27 @@ static void render(void)
     fb_draw_text(42, 16, link_label(st.state), lc, COLOR_BG);
 
     const char *ssid = st.ssid[0] ? st.ssid : "(unset)";
+    if (st.state == WIFI_MGR_PROVISIONING) {
+        ssid = PROV_SOFTAP_SSID;
+    }
     snprintf(line, sizeof(line), "%.14s", ssid);
     fb_draw_text(2, 28, "SSID", COLOR_MUTED, COLOR_BG);
     fb_draw_text(42, 28, line, COLOR_TEXT, COLOR_BG);
 
-    if (st.state == WIFI_MGR_CONNECTED) {
-        snprintf(line, sizeof(line), "%d dBm", st.rssi);
+    if (st.state == WIFI_MGR_PROVISIONING) {
+        fb_draw_text(2, 40, "URL", COLOR_MUTED, COLOR_BG);
+        snprintf(line, sizeof(line), "%d.%d.%d.%d",
+                 PROV_SOFTAP_IP_A, PROV_SOFTAP_IP_B, PROV_SOFTAP_IP_C, PROV_SOFTAP_IP_D);
+        fb_draw_text(42, 40, line, COLOR_ACCENT, COLOR_BG);
     } else {
-        snprintf(line, sizeof(line), "--");
+        if (st.state == WIFI_MGR_CONNECTED) {
+            snprintf(line, sizeof(line), "%d dBm", st.rssi);
+        } else {
+            snprintf(line, sizeof(line), "--");
+        }
+        fb_draw_text(2, 40, "RSSI", COLOR_MUTED, COLOR_BG);
+        fb_draw_text(42, 40, line, COLOR_TEXT, COLOR_BG);
     }
-    fb_draw_text(2, 40, "RSSI", COLOR_MUTED, COLOR_BG);
-    fb_draw_text(42, 40, line, COLOR_TEXT, COLOR_BG);
 
     char bytes[12], rate[12];
     bridge_format_bytes(stats.bytes_to_host, bytes, sizeof(bytes));

@@ -28,6 +28,8 @@ Composite device (TinyUSB via Espressif `esp_tinyusb`):
    - Out-of-band provisioning (`set ssid`, `scan`, `save`, …)  
    - Required because the ESP32-S3 USB-OTG PHY is shared with USB-Serial/JTAG; once OTG TinyUSB owns the PHY, the built-in Serial/JTAG port is gone
 
+When **no SSID** is configured, a third path runs on the Wi‑Fi radio itself: SoftAP **`ESP_WIFITOUSB_CONF`** at **`192.168.1.1`** with a DNS/HTTP captive portal. Nearby SSIDs are scanned first; submitted credentials are tested via STA association (APSTA) before SoftAP is torn down and normal bridging begins.
+
 ### Related USB network classes (research)
 
 | Class | Linux | Windows | macOS | Notes |
@@ -102,6 +104,7 @@ Unlike the Pico’s single main-loop TinyUSB constraint, Espressif’s `esp_tiny
 | TinyUSB task | USB device stack | CPU0 (sdkconfig) |
 | Wi-Fi driver / rxcb | Frame RX into bridge | Wi-Fi task |
 | `console` | CDC-ACM line protocol | any |
+| `httpd` / `dns_server` | SoftAP captive portal (only when unconfigured) | any |
 | `lcd` | ST7735 redraw @ 2 Hz | CPU1 |
 | `led` | APA102 patterns | any |
 

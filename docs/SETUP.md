@@ -146,19 +146,35 @@ Device Drivers → Network device support → USB Network Adapters
 Device Drivers → USB support → USB Modem (CDC ACM) support
 ```
 
-## Provisioning over the console
+## Provisioning
 
-On first boot (no NVS profiles, no baked SSID) the LCD shows `NO CONFIG` and the LED fast-blinks cyan.
+### SoftAP captive portal (no saved SSID)
+
+On first boot (no NVS profiles, no baked SSID) the firmware:
+
+1. Scans and caches nearby SSIDs  
+2. Starts open SoftAP **`ESP_WIFITOUSB_CONF`** with IP **`192.168.1.1`**  
+3. Serves a captive-portal config page (DNS wildcard redirect + HTTP)  
+4. Tests the submitted credentials in AP+STA mode  
+5. On success: saves to NVS, stops SoftAP, associates as a normal station bridge  
+
+LCD shows `SETUP AP` / `ESP_WIFITOUSB_CONF` / `192.168.1.1`. LED pulses magenta.
+
+Join `ESP_WIFITOUSB_CONF` from a phone or laptop and open `http://192.168.1.1` if the captive portal does not pop automatically.
+
+Deleting the last profile (or clearing credentials) over the console re-enters this mode.
+
+### USB CDC console (alternate)
 
 ```text
 -- esp32-ethernetviawifi --
   profiles:   0 saved (active: none)
   ssid:       (unset)
-  status:     idle (no credentials)
+  status:     softap portal
 (set|scan|list|use|del|save|status|help) #
 ```
 
-### Direct set
+#### Direct set
 
 ```text
 set ssid MyNetwork
@@ -166,7 +182,9 @@ set pass hunter2
 save
 ```
 
-### Scan and join
+Setting credentials while the SoftAP portal is up stops the portal and associates.
+
+#### Scan and join
 
 ```text
 scan
@@ -175,7 +193,7 @@ set pass hunter2
 save
 ```
 
-### Multiple profiles
+#### Multiple profiles
 
 ```text
 list

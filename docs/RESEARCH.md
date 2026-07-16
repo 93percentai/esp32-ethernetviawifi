@@ -111,7 +111,7 @@ Forum/docs occasionally mention RF / PHY interactions when USB is active. In pra
 | Provisioning | Serial commands + NVS profiles | Parity with pico-usb-wifi UX |
 | Display | Direct `esp_lcd` + LilyGO ST7735 driver | Proven on this panel; no LVGL overhead |
 | Bridging | Raw L2 (`esp_wifi_internal_*`) | Same semantics as pico / `tusb_ncm` |
-| Not chosen | SoftAP captive portal (`sta2eth`) | Serial console is enough for a USB stick |
+| Chosen later | SoftAP captive portal (`sta2eth`) | Unconfigured stick: `ESP_WIFITOUSB_CONF` @ `192.168.1.1` |
 
 ## 6. ESP32-Ethernet-Kit — real Ethernet vs our USB-emulated Ethernet
 
@@ -234,7 +234,7 @@ Projects re-checked with source-level comparison:
 
 | Peer feature | Why skipped (for now) |
 |--------------|------------------------|
-| SoftAP captive portal (`sta2eth`) | CDC console + LCD enough for a USB stick; can add later |
+| SoftAP captive portal (`sta2eth`) | **Added** — `ESP_WIFITOUSB_CONF` @ `192.168.1.1` when no SSID |
 | SmartConfig (Svarkovsky) | Optional; phone-dependent |
 | RNDIS default (ThingPulse) | NCM is the cross-platform choice pico made |
 | L3 NAT SoftAP (taplink) | Different product (OOB management), not a Wi-Fi NIC |
@@ -244,7 +244,8 @@ Projects re-checked with source-level comparison:
 - IPv6 multicast completeness vs pico’s `allmulti` (may need explicit multicast filter API work)
 - Second CDC debug stream (optional)
 - Throughput tuning (NTB sizes, Wi-Fi AMPDU, pinned cores) — USB FS remains the ceiling
-- Captive SoftAP / SmartConfig fallback for headless provisioning without a serial terminal
+- SoftAP captive portal when unconfigured (`ESP_WIFITOUSB_CONF` → `http://192.168.1.1`, test-then-stop)
+- SmartConfig / ESP-Touch as an additional headless option
 - Validate on no-LCD / Dual / Plus board variants
 - Encrypted NVS for credential-at-rest
 

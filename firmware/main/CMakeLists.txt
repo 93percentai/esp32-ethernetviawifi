@@ -7,6 +7,7 @@ idf_component_register(
         "console.c"
         "display.c"
         "status_led.c"
+        "provisioning.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
@@ -14,8 +15,10 @@ idf_component_register(
         esp_event
         esp_netif
         esp_timer
+        esp_http_server
         driver
         esp_lcd
         esp_lcd_st7735
         espressif__esp_tinyusb
+        dns_server
 )
