@@ -164,6 +164,12 @@ Join `ESP_WIFITOUSB_CONF` from a phone or laptop and open `http://192.168.1.1` i
 
 Deleting the last profile (or clearing credentials) over the console re-enters this mode.
 
+### BOOT button factory Wi‑Fi reset
+
+1. Press the **BOOT** button once — LCD shows **RESET WIFI?** and a countdown  
+2. Press again within **5 seconds** to clear all saved Wi‑Fi profiles and reopen SoftAP setup  
+3. If you do not confirm in time, the normal status screen returns and nothing is erased
+
 ### USB CDC console (alternate)
 
 ```text

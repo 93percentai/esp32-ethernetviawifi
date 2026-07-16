@@ -34,6 +34,8 @@ static const char *TAG = "display";
 
 static esp_lcd_panel_handle_t s_panel;
 static uint16_t s_fb[BOARD_LCD_H_RES * BOARD_LCD_V_RES];
+static volatile display_overlay_t s_overlay = DISPLAY_OVERLAY_NONE;
+static volatile int s_overlay_seconds;
 
 static uint16_t swap565(uint16_t c)
 {
@@ -174,8 +176,34 @@ static void render_conf(const provisioning_lcd_status_t *prov)
     esp_lcd_panel_draw_bitmap(s_panel, 0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, s_fb);
 }
 
+static void render_overlay(void)
+{
+    char line[24];
+    fb_clear(COLOR_BG);
+    fb_fill_rect(0, 0, BOARD_LCD_H_RES, 12, COLOR_PANEL);
+    fb_draw_text(2, 2, "T-DONGLE WIFI", COLOR_ACCENT, COLOR_PANEL);
+
+    if (s_overlay == DISPLAY_OVERLAY_RESET_DONE) {
+        fb_draw_text(28, 28, "WIFI CLEARED", COLOR_OK, COLOR_BG);
+        fb_draw_text(20, 44, "Starting setup", COLOR_TEXT, COLOR_BG);
+    } else {
+        fb_draw_text(36, 18, "RESET WIFI?", COLOR_WARN, COLOR_BG);
+        fb_draw_text(8, 34, "Press again in", COLOR_TEXT, COLOR_BG);
+        snprintf(line, sizeof(line), "%ds to reset", s_overlay_seconds);
+        fb_draw_text(28, 48, line, COLOR_ACCENT, COLOR_BG);
+        fb_draw_text(16, 64, "WiFi settings", COLOR_MUTED, COLOR_BG);
+    }
+
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, s_fb);
+}
+
 static void render(void)
 {
+    if (s_overlay != DISPLAY_OVERLAY_NONE) {
+        render_overlay();
+        return;
+    }
+
     provisioning_lcd_status_t prov;
     provisioning_get_lcd_status(&prov);
     if (prov.active) {
@@ -226,12 +254,19 @@ static void render(void)
     esp_lcd_panel_draw_bitmap(s_panel, 0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, s_fb);
 }
 
+void display_set_overlay(display_overlay_t kind, int seconds_left)
+{
+    s_overlay = kind;
+    s_overlay_seconds = seconds_left;
+}
+
 static void display_task(void *arg)
 {
     (void)arg;
     while (true) {
         render();
-        vTaskDelay(pdMS_TO_TICKS(500));
+        /* Faster refresh while a timed overlay is visible. */
+        vTaskDelay(pdMS_TO_TICKS(s_overlay != DISPLAY_OVERLAY_NONE ? 200 : 500));
     }
 }
 
@@ -299,5 +334,10 @@ void display_task_start(void)
 
 esp_err_t display_init(void) { return ESP_OK; }
 void display_task_start(void) {}
+void display_set_overlay(display_overlay_t kind, int seconds_left)
+{
+    (void)kind;
+    (void)seconds_left;
+}
 
 #endif

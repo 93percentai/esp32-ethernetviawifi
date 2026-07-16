@@ -72,6 +72,8 @@ Hard-wired to the USB-A plug. No external USB PHY.
 |--------|------|-------|
 | BOOT | 0 | Active-low, internal pull-up |
 
+Firmware use (after boot): press once to show a **RESET WIFI?** confirm screen; press again within **5 seconds** to wipe saved Wi‑Fi profiles from NVS and re-enter SoftAP setup. If the second press does not arrive in time, the status HUD returns to normal.
+
 ### TF card (unused here; documented for completeness)
 
 | Signal | GPIO |

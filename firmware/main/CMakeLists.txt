@@ -8,6 +8,7 @@ idf_component_register(
         "display.c"
         "status_led.c"
         "provisioning.c"
+        "button.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash

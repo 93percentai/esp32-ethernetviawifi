@@ -136,3 +136,11 @@ void config_del_profile(bridge_config_t *cfg, int index)
         cfg->active--;
     }
 }
+
+void config_clear_wifi(bridge_config_t *cfg)
+{
+    /* Explicit user reset: do not re-seed compile-time menuconfig SSID. */
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->active = CFG_ACTIVE_NONE;
+    ESP_LOGI(TAG, "Wi-Fi profiles cleared");
+}
