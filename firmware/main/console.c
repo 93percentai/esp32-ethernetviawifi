@@ -7,9 +7,11 @@
 
 #include "bridge.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "provisioning.h"
+#include "soc/rtc_cntl_reg.h"
 #include "tinyusb.h"
 #include "tusb_cdc_acm.h"
 #include "wifi_mgr.h"
@@ -90,7 +92,7 @@ static void print_status(void)
                    (unsigned long)stats.drop_tx,
                    (unsigned long)stats.drop_rx,
                    (unsigned long)stats.drop_refl);
-    console_printf("(set|scan|list|use|del|save|status|help) # ");
+    console_printf("(set|scan|list|use|del|save|reboot|bootloader|status|help) # ");
 }
 
 static void cmd_help(void)
@@ -107,10 +109,37 @@ static void cmd_help(void)
         "  save                persist profiles to NVS\r\n"
         "  status              show link + traffic stats\r\n"
         "  resetstats          clear byte/frame counters\r\n"
+        "  reboot              software reset (normal boot)\r\n"
+        "  bootloader          reboot into ROM download / flash mode\r\n"
         "  help                this text\r\n"
         "\r\n"
         "With no SSID, SoftAP '%s' + http://192.168.1.1 is also available.\r\n",
         PROV_SOFTAP_SSID);
+}
+
+static void cdc_flush_and_delay(void)
+{
+    if (tud_cdc_n_connected(TINYUSB_CDC_ACM_0)) {
+        tinyusb_cdcacm_write_flush(TINYUSB_CDC_ACM_0, pdMS_TO_TICKS(200));
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+}
+
+static void cmd_reboot(void)
+{
+    console_printf("[*] rebooting...\r\n");
+    cdc_flush_and_delay();
+    esp_restart();
+}
+
+static void cmd_bootloader(void)
+{
+    console_printf("[*] rebooting to ROM download mode...\r\n");
+    console_printf("    (hold may not be needed; USB-Serial/JTAG should appear)\r\n");
+    cdc_flush_and_delay();
+    /* Next reset enters download boot; TinyUSB releases the shared USB PHY. */
+    REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+    esp_restart();
 }
 
 static wifi_scan_result_t s_scan[24];
@@ -221,6 +250,12 @@ static void handle_line(char *line)
     } else if (strcmp(cmd, "resetstats") == 0) {
         bridge_reset_stats();
         console_printf("[*] stats cleared\r\n");
+    } else if (strcmp(cmd, "reboot") == 0 || strcmp(cmd, "reset") == 0) {
+        cmd_reboot();
+        return; /* unreachable */
+    } else if (strcmp(cmd, "bootloader") == 0 || strcmp(cmd, "download") == 0) {
+        cmd_bootloader();
+        return; /* unreachable */
     } else if (strcmp(cmd, "set") == 0) {
         char *key = rest;
         char *val = strchr(rest, ' ');

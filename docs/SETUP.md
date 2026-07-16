@@ -62,6 +62,8 @@ The dongle’s USB-A connector is wired to the ESP32-S3 **USB-OTG** pins. This f
 
 LilyGO’s own USB HID / MSC examples document the same requirement: Tools → USB Mode → **USB-OTG (TinyUSB)**, and flash via download mode.
 
+If the CDC management console is already open, you can skip holding BOOT: run `bootloader` (or `download`) to reboot into ROM download mode, then flash.
+
 ### Enter download mode
 
 1. Unplug the dongle  
@@ -209,6 +211,9 @@ save
 ```
 
 Commands are case-insensitive. `status` reprints link + traffic counters. `resetstats` clears byte/frame totals.
+
+- `reboot` — software reset (normal app boot)  
+- `bootloader` (alias `download`) — reboot into ROM download mode so you can flash without holding BOOT (USB-Serial/JTAG COM returns while TinyUSB is down)
 
 ## Verifying the bridge
 
