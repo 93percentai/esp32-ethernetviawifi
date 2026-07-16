@@ -178,6 +178,8 @@ esp_err_t wifi_mgr_apply(const bridge_config_t *cfg)
         wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
     }
 
+    /* Ensure SoftAP from a prior portal session is not left advertising. */
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     strncpy(s_status.ssid, ssid, sizeof(s_status.ssid) - 1);
     s_status.state = WIFI_MGR_CONNECTING;

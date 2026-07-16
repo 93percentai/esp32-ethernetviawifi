@@ -6,8 +6,8 @@
 #include "board.h"
 #include "bridge.h"
 #include "driver/gpio.h"
-#include "driver/ledc.h"
 #include "driver/spi_master.h"
+#include "esp_idf_version.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_st7735.h"
@@ -252,7 +252,11 @@ esp_err_t display_init(void)
 
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = BOARD_LCD_PIN_RST,
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
+#else
         .color_space = ESP_LCD_COLOR_SPACE_BGR,
+#endif
         .bits_per_pixel = 16,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7735(io, &panel_config, &s_panel));
@@ -264,31 +268,25 @@ esp_err_t display_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(s_panel, false, true));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
 
-    /* Backlight via LEDC, active-low */
-    ledc_timer_config_t timer = {
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .duty_resolution = LEDC_TIMER_8_BIT,
-        .timer_num = LEDC_TIMER_0,
-        .freq_hz = 5000,
-        .clk_cfg = LEDC_AUTO_CLK,
+    /*
+     * Backlight is active-low on T-Dongle-S3. Drive it as a plain GPIO so a
+     * failed/partial LEDC setup cannot leave the panel dark.
+     */
+    gpio_config_t bl_conf = {
+        .pin_bit_mask = 1ULL << BOARD_LCD_PIN_BL,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
     };
-    ESP_ERROR_CHECK(ledc_timer_config(&timer));
-    ledc_channel_config_t ch = {
-        .gpio_num = BOARD_LCD_PIN_BL,
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel = LEDC_CHANNEL_0,
-        .timer_sel = LEDC_TIMER_0,
-        .duty = BOARD_LCD_BL_ON_LEVEL ? 200 : (255 - 200),
-        .hpoint = 0,
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ch));
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0,
-                                  BOARD_LCD_BL_ON_LEVEL ? 220 : (255 - 220)));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+    ESP_ERROR_CHECK(gpio_config(&bl_conf));
+    ESP_ERROR_CHECK(gpio_set_level(BOARD_LCD_PIN_BL, BOARD_LCD_BL_ON_LEVEL));
 
     fb_clear(COLOR_BG);
     fb_draw_text(24, 36, "BOOTING...", COLOR_ACCENT, COLOR_BG);
     esp_lcd_panel_draw_bitmap(s_panel, 0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, s_fb);
+    ESP_LOGI(TAG, "ST7735 ready, backlight on (GPIO%d=%d)",
+             BOARD_LCD_PIN_BL, BOARD_LCD_BL_ON_LEVEL);
     return ESP_OK;
 }
 

@@ -22,7 +22,8 @@ No host-side Wi-Fi stack, vendor driver, or `wpa_supplicant` is required — onl
 - Site scan / join from the serial console (alternate provisioning path)
 - **ST7735 LCD** live status: link state, SSID, RSSI, download/upload totals and rates
 - **APA102** status LED (association / error patterns)
-- Built with ESP-IDF 5.4 + Espressif TinyUSB (`esp_tinyusb`)
+- Built with ESP-IDF 5.4 (+ IDF 6.x API patches) and Espressif TinyUSB (`esp_tinyusb`)
+- No mandatory PSRAM — boots on T-Dongle-S3 revisions without working OPI RAM
 
 ## Quick start
 

@@ -10,7 +10,7 @@ See [HARDWARE.md](HARDWARE.md) for pinout and USB-OTG details.
 
 ## Install ESP-IDF
 
-Tested with **ESP-IDF v5.4.2** (matches the `esp_tinyusb` 1.7.x APIs used in-tree).
+Primary target: **ESP-IDF v5.4.2**. The tree also includes API/CMake patches needed for **ESP-IDF 6.x** (`WIFI_IF_STA`, `rgb_ele_order`, `esp_driver_gpio` / `esp_driver_spi`).
 
 ```bash
 git clone -b v5.4.2 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
@@ -231,15 +231,18 @@ Expect USB Full-Speed class throughput on the order of a few Mbit/s of TCP paylo
 | `BAD AUTH` on LCD | Wrong passphrase / WPA3-only quirks | Recheck password; try WPA2 AP |
 | `NO AP` | 5 GHz-only SSID / out of range | Use 2.4 GHz SSID |
 | Traffic one-way / stalls | USB power / hub issues | Plug into root port; avoid unpowered hubs |
-| LCD blank | No-screen board variant / BL pin | Disable LCD in menuconfig; check `CONFIG_BRIDGE_LCD_ENABLED` |
-| Build fails on PSRAM | Board without OPI PSRAM | `idf.py menuconfig` → disable SPIRAM, or use `sdkconfig` without `CONFIG_SPIRAM` |
+| LCD blank / boot loop before TinyUSB | Forced Octal PSRAM on a stick without reliable OPI RAM | Defaults leave SPIRAM **off**; wipe stale `sdkconfig` and rebuild |
+| LCD blank (app running) | No-screen board variant / BL pin | Disable LCD in menuconfig; check `CONFIG_BRIDGE_LCD_ENABLED` |
 
 ### PSRAM note
 
-`sdkconfig.defaults.esp32s3` enables Octal PSRAM (common on LCD units). If your stick has no PSRAM, remove or comment those `CONFIG_SPIRAM*` lines and reconfigure:
+This firmware fits in internal RAM. `sdkconfig.defaults.esp32s3` **does not** enable SPIRAM — forcing Octal PSRAM caused boot-loop aborts (`PSRAM chip is not connected`) on some T-Dongle-S3 revisions, so the LCD/SoftAP never started.
+
+If you have a board with working OPI PSRAM and want it, enable SPIRAM in menuconfig (or uncomment the `CONFIG_SPIRAM*` lines in `sdkconfig.defaults.esp32s3`) and prefer `CONFIG_SPIRAM_IGNORE_NOTFOUND=y`. After changing defaults:
 
 ```bash
 rm sdkconfig
+idf.py fullclean
 idf.py set-target esp32s3
 idf.py build
 ```

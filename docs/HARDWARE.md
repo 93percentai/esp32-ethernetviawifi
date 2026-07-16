@@ -123,7 +123,7 @@ Default: PCB antenna. Some units expose IPEX; moving a 0 Ω resistor selects the
 | T-Dongle-S3 without LCD | No | Build with `CONFIG_BRIDGE_LCD_ENABLED=n` |
 | T-Dongle-S3 Dual / Plus | Different | Different pinouts / extras — **not** validated here |
 
-Always confirm your board’s PSRAM and flash size against the sticker / LilyGO docs before enabling SPIRAM.
+Firmware defaults leave SPIRAM **disabled** so sticks without reliable OPI PSRAM still boot. Confirm your board’s PSRAM and flash size against the sticker / LilyGO docs before enabling SPIRAM.
 
 ## How other projects use this board (summary)
 

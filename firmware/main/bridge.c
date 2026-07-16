@@ -75,7 +75,7 @@ static esp_err_t usb_recv_callback(void *buffer, uint16_t len, void *ctx)
         return ESP_OK;
     }
 
-    esp_err_t err = esp_wifi_internal_tx(ESP_IF_WIFI_STA, buffer, len);
+    esp_err_t err = esp_wifi_internal_tx(WIFI_IF_STA, buffer, len);
     stats_lock();
     if (err == ESP_OK) {
         s_stats.bytes_to_wifi += len;
@@ -168,11 +168,11 @@ esp_err_t bridge_init(const uint8_t sta_mac[6])
 void bridge_set_wifi_up(bool up)
 {
     if (up && !s_wifi_up) {
-        esp_wifi_internal_reg_rxcb(ESP_IF_WIFI_STA, pkt_wifi2usb);
+        esp_wifi_internal_reg_rxcb(WIFI_IF_STA, pkt_wifi2usb);
         tud_network_link_state(0, true);
         ESP_LOGI(TAG, "L2 bridge armed (wifi→usb), NCM link up");
     } else if (!up && s_wifi_up) {
-        esp_wifi_internal_reg_rxcb(ESP_IF_WIFI_STA, NULL);
+        esp_wifi_internal_reg_rxcb(WIFI_IF_STA, NULL);
         tud_network_link_state(0, false);
         ESP_LOGI(TAG, "L2 bridge disarmed, NCM link down");
     } else if (!up) {

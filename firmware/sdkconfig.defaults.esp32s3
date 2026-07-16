@@ -1,8 +1,10 @@
 CONFIG_TINYUSB_TASK_AFFINITY_CPU0=y
 CONFIG_TINYUSB_INIT_IN_DEFAULT_TASK=y
 CONFIG_TINYUSB_NET_MODE_NCM=y
-CONFIG_ESP32S3_SPIRAM_SUPPORT=y
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_80M=y
-CONFIG_SPIRAM_USE_MALLOC=y
+# T-Dongle-S3 revisions vary: some LCD sticks have no/unreliable OPI PSRAM.
+# This firmware fits in internal RAM; forcing SPIRAM caused boot-loop aborts:
+#   "octal_psram: PSRAM chip is not connected, or wrong PSRAM line mode"
+#CONFIG_SPIRAM=y
+#CONFIG_SPIRAM_MODE_OCT=y
+#CONFIG_SPIRAM_SPEED_80M=y
+#CONFIG_SPIRAM_USE_MALLOC=y
