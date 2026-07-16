@@ -248,7 +248,7 @@ Projects re-checked with source-level comparison:
 - Validate on no-LCD / Dual / Plus board variants
 - Encrypted NVS for credential-at-rest
 
-## 8. References
+## 9. References
 
 1. https://gitlab.com/baiyibai/pico-usb-wifi  
 2. https://github.com/espressif/esp-idf/tree/v5.4.2/examples/peripherals/usb/device/tusb_ncm  
