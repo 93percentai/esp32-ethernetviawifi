@@ -239,7 +239,7 @@ Projects re-checked with source-level comparison:
 | RNDIS default (ThingPulse) | NCM is the cross-platform choice pico made |
 | L3 NAT SoftAP (taplink) | Different product (OOB management), not a Wi-Fi NIC |
 
-## 7. Known gaps / future work
+## 8. Known gaps / future work
 
 - IPv6 multicast completeness vs pico’s `allmulti` (may need explicit multicast filter API work)
 - Second CDC debug stream (optional)
