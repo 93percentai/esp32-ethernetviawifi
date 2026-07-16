@@ -128,8 +128,61 @@ static uint16_t link_color(wifi_mgr_state_t s)
     }
 }
 
+static void render_conf(const provisioning_lcd_status_t *prov)
+{
+    char line[32];
+
+    fb_clear(COLOR_BG);
+    fb_fill_rect(0, 0, BOARD_LCD_H_RES, 12, COLOR_PANEL);
+    fb_draw_text(2, 2, "T-DONGLE WIFI", COLOR_ACCENT, COLOR_PANEL);
+
+    const char *link = "SETUP AP";
+    uint16_t lc = COLOR_WARN;
+    if (prov->phase == PROV_PHASE_SCANNING) {
+        link = "SCANNING";
+    } else if (prov->phase == PROV_PHASE_TESTING) {
+        link = "TESTING";
+    } else if (prov->phase == PROV_PHASE_SUCCESS) {
+        link = "SAVED";
+        lc = COLOR_OK;
+    }
+    fb_draw_text(2, 16, "LINK", COLOR_MUTED, COLOR_BG);
+    fb_draw_text(42, 16, link, lc, COLOR_BG);
+
+    fb_draw_text(2, 28, "AP", COLOR_MUTED, COLOR_BG);
+    /* Full SoftAP name fits at 8px glyphs if we skip the "SSID" label width. */
+    snprintf(line, sizeof(line), "%.17s", PROV_SOFTAP_SSID);
+    fb_draw_text(26, 28, line, COLOR_TEXT, COLOR_BG);
+
+    fb_draw_text(2, 40, "URL", COLOR_MUTED, COLOR_BG);
+    snprintf(line, sizeof(line), "%d.%d.%d.%d",
+             PROV_SOFTAP_IP_A, PROV_SOFTAP_IP_B, PROV_SOFTAP_IP_C, PROV_SOFTAP_IP_D);
+    fb_draw_text(42, 40, line, COLOR_ACCENT, COLOR_BG);
+
+    fb_draw_text(2, 52, "STA", COLOR_MUTED, COLOR_BG);
+    snprintf(line, sizeof(line), "%.14s", prov->detail[0] ? prov->detail : "--");
+    fb_draw_text(42, 52, line, COLOR_TEXT, COLOR_BG);
+
+    fb_draw_text(2, 64, "NET", COLOR_MUTED, COLOR_BG);
+    if (prov->phase == PROV_PHASE_SCANNING) {
+        snprintf(line, sizeof(line), "scanning...");
+    } else {
+        snprintf(line, sizeof(line), "%d found", prov->scan_count);
+    }
+    fb_draw_text(42, 64, line, COLOR_TEXT, COLOR_BG);
+
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, s_fb);
+}
+
 static void render(void)
 {
+    provisioning_lcd_status_t prov;
+    provisioning_get_lcd_status(&prov);
+    if (prov.active) {
+        render_conf(&prov);
+        return;
+    }
+
     wifi_mgr_status_t st;
     bridge_stats_t stats;
     wifi_mgr_get_status(&st);
@@ -145,27 +198,17 @@ static void render(void)
     fb_draw_text(42, 16, link_label(st.state), lc, COLOR_BG);
 
     const char *ssid = st.ssid[0] ? st.ssid : "(unset)";
-    if (st.state == WIFI_MGR_PROVISIONING) {
-        ssid = PROV_SOFTAP_SSID;
-    }
     snprintf(line, sizeof(line), "%.14s", ssid);
     fb_draw_text(2, 28, "SSID", COLOR_MUTED, COLOR_BG);
     fb_draw_text(42, 28, line, COLOR_TEXT, COLOR_BG);
 
-    if (st.state == WIFI_MGR_PROVISIONING) {
-        fb_draw_text(2, 40, "URL", COLOR_MUTED, COLOR_BG);
-        snprintf(line, sizeof(line), "%d.%d.%d.%d",
-                 PROV_SOFTAP_IP_A, PROV_SOFTAP_IP_B, PROV_SOFTAP_IP_C, PROV_SOFTAP_IP_D);
-        fb_draw_text(42, 40, line, COLOR_ACCENT, COLOR_BG);
+    if (st.state == WIFI_MGR_CONNECTED) {
+        snprintf(line, sizeof(line), "%d dBm", st.rssi);
     } else {
-        if (st.state == WIFI_MGR_CONNECTED) {
-            snprintf(line, sizeof(line), "%d dBm", st.rssi);
-        } else {
-            snprintf(line, sizeof(line), "--");
-        }
-        fb_draw_text(2, 40, "RSSI", COLOR_MUTED, COLOR_BG);
-        fb_draw_text(42, 40, line, COLOR_TEXT, COLOR_BG);
+        snprintf(line, sizeof(line), "--");
     }
+    fb_draw_text(2, 40, "RSSI", COLOR_MUTED, COLOR_BG);
+    fb_draw_text(42, 40, line, COLOR_TEXT, COLOR_BG);
 
     char bytes[12], rate[12];
     bridge_format_bytes(stats.bytes_to_host, bytes, sizeof(bytes));

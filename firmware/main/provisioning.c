@@ -34,11 +34,30 @@ static char s_status_msg[96];
 static SemaphoreHandle_t s_lock;
 static bool s_testing;
 static bool s_netif_ready;
+static prov_phase_t s_phase;
+static int s_clients;
+static bool s_ap_events_registered;
 
 static void set_status_msg(const char *msg)
 {
     strncpy(s_status_msg, msg ? msg : "", sizeof(s_status_msg) - 1);
     s_status_msg[sizeof(s_status_msg) - 1] = '\0';
+}
+
+static void on_ap_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id == WIFI_EVENT_AP_STACONNECTED) {
+        s_clients++;
+        ESP_LOGI(TAG, "Portal client join (clients=%d)", s_clients);
+    } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
+        if (s_clients > 0) {
+            s_clients--;
+        }
+        ESP_LOGI(TAG, "Portal client leave (clients=%d)", s_clients);
+    }
+    (void)data;
 }
 
 static void html_escape(const char *in, char *out, size_t out_len)
@@ -266,6 +285,7 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     s_testing = true;
+    s_phase = PROV_PHASE_TESTING;
     set_status_msg("Testing connection…");
     xSemaphoreGive(s_lock);
 
@@ -277,6 +297,7 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
     if (terr == ESP_OK) {
         int idx = config_add_profile(s_cfg, ssid);
         if (idx < 0) {
+            s_phase = PROV_PHASE_PORTAL;
             set_status_msg("Failed: profile list full.");
             xSemaphoreGive(s_lock);
             httpd_resp_set_status(req, "303 See Other");
@@ -287,6 +308,7 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
         s_cfg->active = (uint8_t)idx;
         strncpy(s_cfg->profiles[idx].password, pass, CFG_PASS_MAX - 1);
         config_save(s_cfg);
+        s_phase = PROV_PHASE_SUCCESS;
         set_status_msg("Connected — saving and closing setup network…");
         xSemaphoreGive(s_lock);
 
@@ -307,6 +329,7 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
     } else {
         set_status_msg("Failed: could not associate (wrong password or AP unreachable).");
     }
+    s_phase = PROV_PHASE_PORTAL;
     wifi_mgr_set_state(WIFI_MGR_PROVISIONING);
     xSemaphoreGive(s_lock);
 
@@ -403,6 +426,14 @@ static esp_err_t start_softap(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
 
+    if (!s_ap_events_registered) {
+        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED,
+                                                   on_ap_event, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED,
+                                                   on_ap_event, NULL));
+        s_ap_events_registered = true;
+    }
+
     ESP_LOGI(TAG, "SoftAP '%s' at %d.%d.%d.%d",
              PROV_SOFTAP_SSID,
              PROV_SOFTAP_IP_A, PROV_SOFTAP_IP_B, PROV_SOFTAP_IP_C, PROV_SOFTAP_IP_D);
@@ -423,7 +454,9 @@ esp_err_t provisioning_start(bridge_config_t *cfg)
         s_lock = xSemaphoreCreateMutex();
     }
     s_testing = false;
-    set_status_msg("Pick a network, enter the password, then Test & Save.");
+    s_clients = 0;
+    s_phase = PROV_PHASE_SCANNING;
+    set_status_msg("Scanning nearby networks…");
 
     wifi_mgr_set_suppress_bridge(true);
     wifi_mgr_set_state(WIFI_MGR_PROVISIONING);
@@ -433,9 +466,11 @@ esp_err_t provisioning_start(bridge_config_t *cfg)
     ESP_LOGI(TAG, "Captured %d SSID(s)", s_scan_count);
 
     wifi_mgr_set_state(WIFI_MGR_PROVISIONING);
+    set_status_msg("Pick a network, enter the password, then Test & Save.");
 
     esp_err_t err = start_softap();
     if (err != ESP_OK) {
+        s_phase = PROV_PHASE_IDLE;
         wifi_mgr_set_suppress_bridge(false);
         wifi_mgr_set_state(WIFI_MGR_IDLE);
         return err;
@@ -443,6 +478,7 @@ esp_err_t provisioning_start(bridge_config_t *cfg)
 
     err = start_httpd();
     if (err != ESP_OK) {
+        s_phase = PROV_PHASE_IDLE;
         esp_wifi_set_mode(WIFI_MODE_STA);
         wifi_mgr_set_suppress_bridge(false);
         wifi_mgr_set_state(WIFI_MGR_IDLE);
@@ -452,7 +488,9 @@ esp_err_t provisioning_start(bridge_config_t *cfg)
     dns_server_config_t dns_cfg = DNS_SERVER_CONFIG_SINGLE("*", "WIFI_AP_DEF");
     s_dns = start_dns_server(&dns_cfg);
 
+    s_phase = PROV_PHASE_PORTAL;
     s_active = true;
+    wifi_mgr_set_state(WIFI_MGR_PROVISIONING);
     ESP_LOGI(TAG, "Captive portal ready — join '%s' and open http://192.168.1.1",
              PROV_SOFTAP_SSID);
     return ESP_OK;
@@ -460,13 +498,15 @@ esp_err_t provisioning_start(bridge_config_t *cfg)
 
 void provisioning_stop(void)
 {
-    if (!s_active) {
+    if (!s_active && s_phase == PROV_PHASE_IDLE) {
         return;
     }
 
     ESP_LOGI(TAG, "Stopping SoftAP captive portal");
     s_active = false;
     s_testing = false;
+    s_clients = 0;
+    s_phase = PROV_PHASE_IDLE;
 
     if (s_dns) {
         stop_dns_server(s_dns);
@@ -485,6 +525,40 @@ void provisioning_stop(void)
 bool provisioning_is_active(void)
 {
     return s_active;
+}
+
+void provisioning_get_lcd_status(provisioning_lcd_status_t *out)
+{
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->phase = s_phase;
+    out->active = (s_phase != PROV_PHASE_IDLE);
+    out->scan_count = s_scan_count;
+    out->clients = s_clients;
+
+    switch (s_phase) {
+    case PROV_PHASE_SCANNING:
+        snprintf(out->detail, sizeof(out->detail), "Scanning...");
+        break;
+    case PROV_PHASE_TESTING:
+        snprintf(out->detail, sizeof(out->detail), "Testing WiFi");
+        break;
+    case PROV_PHASE_SUCCESS:
+        snprintf(out->detail, sizeof(out->detail), "Saved - closing");
+        break;
+    case PROV_PHASE_PORTAL:
+        if (s_clients > 0) {
+            snprintf(out->detail, sizeof(out->detail), "%d client(s)", s_clients);
+        } else {
+            snprintf(out->detail, sizeof(out->detail), "Join SoftAP");
+        }
+        break;
+    default:
+        out->detail[0] = '\0';
+        break;
+    }
 }
 
 esp_err_t provisioning_apply_or_start(bridge_config_t *cfg)

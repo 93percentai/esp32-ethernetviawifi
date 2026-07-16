@@ -158,7 +158,7 @@ On first boot (no NVS profiles, no baked SSID) the firmware:
 4. Tests the submitted credentials in AP+STA mode  
 5. On success: saves to NVS, stops SoftAP, associates as a normal station bridge  
 
-LCD shows `SETUP AP` / `ESP_WIFITOUSB_CONF` / `192.168.1.1`. LED pulses magenta.
+LCD keeps a live setup HUD: `SETUP AP` / SoftAP name / `192.168.1.1` / client phase / networks found. LED pulses magenta.
 
 Join `ESP_WIFITOUSB_CONF` from a phone or laptop and open `http://192.168.1.1` if the captive portal does not pop automatically.
 

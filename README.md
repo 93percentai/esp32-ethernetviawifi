@@ -91,11 +91,11 @@ The host gets a USB Ethernet interface. NetworkManager / `systemd-networkd` / Wi
 
 | Field | Meaning |
 |-------|---------|
-| LINK | `CONNECTED` / `ASSOCIATING` / `SETUP AP` / `NO CONFIG` / `BAD AUTH` / … |
-| SSID | Active network name (or `ESP_WIFITOUSB_CONF` while provisioning) |
+| LINK | `CONNECTED` / `ASSOCIATING` / `SETUP AP` / `SCANNING` / `TESTING` / … |
+| SSID / AP | Active network, or SoftAP name `ESP_WIFITOUSB_CONF` in setup mode |
 | RSSI / URL | Signal when associated; portal IP `192.168.1.1` in setup mode |
-| DN | Bytes + rate Wi-Fi → host (download) |
-| UP | Bytes + rate host → Wi-Fi (upload) |
+| DN / STA | Download stats, or portal client / phase status in setup mode |
+| UP / NET | Upload stats, or nearby-SSID count in setup mode |
 
 ## Documentation
 

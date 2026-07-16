@@ -50,10 +50,12 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_mgr_init(&cfg));
     ESP_ERROR_CHECK(bridge_init(wifi_mgr_sta_mac()));
     ESP_ERROR_CHECK(console_init(&cfg));
-    ESP_ERROR_CHECK(provisioning_apply_or_start(&cfg));
 
+    /* Start HUD before provisioning so SoftAP scan/portal status is live. */
     display_task_start();
     status_led_task_start();
+
+    ESP_ERROR_CHECK(provisioning_apply_or_start(&cfg));
 
     if (provisioning_is_active()) {
         ESP_LOGI(TAG, "Ready. Join SoftAP '%s' and open http://192.168.1.1 "
