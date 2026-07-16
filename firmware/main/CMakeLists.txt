@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "bridge.c"
+        "wifi_mgr.c"
+        "config_store.c"
+        "console.c"
+        "display.c"
+        "status_led.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_timer
+        driver
+        esp_lcd
+        esp_lcd_st7735
+        espressif__esp_tinyusb
+)
