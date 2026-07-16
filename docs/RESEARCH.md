@@ -113,7 +113,97 @@ Forum/docs occasionally mention RF / PHY interactions when USB is active. In pra
 | Bridging | Raw L2 (`esp_wifi_internal_*`) | Same semantics as pico / `tusb_ncm` |
 | Not chosen | SoftAP captive portal (`sta2eth`) | Serial console is enough for a USB stick |
 
-## 6. Audit against peer projects (follow-up review)
+## 6. ESP32-Ethernet-Kit — real Ethernet vs our USB-emulated Ethernet
+
+Espressif’s [ESP32-Ethernet-Kit](https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32/esp32-ethernet-kit/user_guide.html) is the official board for the same *product idea* (bring Wi-Fi to a host that only has a wired NIC) but with a **hardware** Ethernet port instead of a USB gadget.
+
+### Hardware
+
+| Item | ESP32-Ethernet-Kit v1.2 | This project (T-Dongle-S3) |
+|------|-------------------------|----------------------------|
+| MCU | ESP32-WROVER-E (classic ESP32) | ESP32-S3 |
+| “Wired” side | RJ45 + **IP101GRI PHY** over **RMII** | USB-A + **software CDC-NCM** (TinyUSB) |
+| USB on board | FT2232H (UART + JTAG only) | Native USB-OTG (data plane) |
+| PHY / MAC | Real IEEE 802.3 10/100 | Emulated Ethernet-over-USB |
+| Throughput class | Up to ~100 Mbit/s wire | USB Full-Speed (~few Mbit/s practical) |
+| Power | USB / 5 V / optional PoE board B | USB bus power |
+
+IP101GRI pin map (RMII, fixed on ESP32):
+
+| Function | GPIO |
+|----------|------|
+| TX_EN | 21 |
+| TXD0 / TXD1 | 19 / 22 |
+| RXD0 / RXD1 | 25 / 26 |
+| CRS_DV | 27 |
+| REF_CLK | 0 |
+| MDC / MDIO | 23 / 18 |
+| PHY Reset_N | 5 |
+
+Docs stress: if Wi-Fi and Ethernet run together, RMII clock must come from the **PHY** (default), not ESP32 APLL.
+
+### Official code paths for that kit
+
+1. [`examples/ethernet/basic`](https://github.com/espressif/esp-idf/tree/v5.4.2/examples/ethernet/basic)  
+   - Bring-up: `esp_eth_mac_new_esp32` + `esp_eth_phy_new_ip101`, DHCP, ping.  
+   - First smoke test for the kit.
+
+2. [`examples/network/eth2ap`](https://github.com/espressif/esp-idf/tree/v5.4.2/examples/network/eth2ap)  
+   - Topology: **Ethernet = WAN**, **Wi-Fi SoftAP = LAN**.  
+   - L2 forward with `esp_eth_update_input_path` ↔ `esp_wifi_internal_tx(WIFI_IF_AP, …)` / `esp_wifi_internal_reg_rxcb(WIFI_IF_AP, …)`.  
+   - Promiscuous Ethernet RX. No TCP/IP stack on the bridge.  
+   - README explicitly recommends ESP32-Ethernet-Kit.
+
+3. [`examples/network/sta2eth`](https://github.com/espressif/esp-idf/tree/v5.5.3/examples/network/sta2eth)  
+   - Topology closest to ours: **Wi-Fi STA ↔ wired NIC** (1:1).  
+   - Wired side selectable: **real Ethernet** *or* **USB NCM**.  
+   - Same application; only `ethernet_iface.c` vs `usb_ncm_iface.c` changes.
+
+### Why Ethernet path needs MAC spoofing (and USB NCM does not)
+
+From `sta2eth` `ethernet_iface.c` comments:
+
+```
+(ISP) router        ESP32               PC
+   [ AP ] <->   [ sta -- eth ] <->  [ eth-NIC ]
+```
+
+The PC’s RJ45 NIC has its **own** factory MAC. The Wi-Fi STA association only allows **one** station MAC. So the Ethernet path either:
+
+- enables Ethernet promiscuous mode and rewrites MACs (`mac_spoof()` — parses DHCP to learn the PC NIC MAC), or  
+- sets STA MAC equal to the PC NIC (awkward; PC MAC unknown until traffic appears).
+
+From `usb_ncm_iface.c` on the **same** example:
+
+```
+No need to modify the ethernet frames here, as we can set the
+station's MAC to the USB NCM device.
+```
+
+`mac_spoof()` for USB is an **empty function**. That is exactly our approach (and pico-usb-wifi): we **choose** the NCM MAC = STA MAC before the host enumerates, so frames forward verbatim.
+
+### Topology comparison
+
+```
+ESP32-Ethernet-Kit + eth2ap:
+  Internet --RJ45--> [ETH PHY] --L2--> [Wi-Fi AP] ))) phone/laptop
+
+ESP32-Ethernet-Kit + sta2eth (Ethernet):
+  Internet ))) [Wi-Fi STA] --L2+MAC rewrite--> [ETH PHY] --RJ45--> PC NIC
+
+T-Dongle + this firmware / sta2eth (USB NCM):
+  Internet ))) [Wi-Fi STA] --L2 verbatim--> [USB CDC-NCM gadget] --> Host USB stack
+```
+
+So: same bridging philosophy as the Ethernet Kit’s `sta2eth` mode; we replace the IP101+RJ45 with a **full software Ethernet device** (CDC-NCM descriptors, link-state notifications, host-side `cdc_ncm` driver). USB on the Ethernet Kit is only for flashing/debug — it never carries the data plane.
+
+### Takeaways for this port
+
+- Studying the Ethernet Kit confirms Espressif treats **USB-NCM as a drop-in “wired” peer** next to real ETH in `sta2eth`.
+- We should keep following the USB half of that example (no frame rewrite, link-state, internal Wi-Fi TX/RX), not the Ethernet half’s promiscuous/`mac_spoof` machinery.
+- eth2ap is the *opposite* product (share Ethernet WAN over SoftAP); useful reference for raw `esp_wifi_internal_*` but wrong topology for a USB Wi-Fi dongle.
+
+## 7. Audit against peer projects (follow-up review)
 
 Projects re-checked with source-level comparison:
 
