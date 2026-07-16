@@ -24,6 +24,7 @@ No host-side Wi-Fi stack, vendor driver, or `wpa_supplicant` is required — onl
 - **APA102** status LED (association / error patterns)
 - Built with ESP-IDF 5.4 (+ IDF 6.x API patches) and Espressif TinyUSB (`esp_tinyusb`)
 - No mandatory PSRAM — boots on T-Dongle-S3 revisions without working OPI RAM
+- **BOOT button**: press once for reset prompt, again within 5 s to clear Wi‑Fi settings
 
 ## Quick start
 

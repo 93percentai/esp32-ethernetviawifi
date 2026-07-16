@@ -13,6 +13,7 @@
 #include <stdio.h>
 
 #include "bridge.h"
+#include "button.h"
 #include "config_store.h"
 #include "console.h"
 #include "display.h"
@@ -54,6 +55,8 @@ void app_main(void)
     /* Start HUD before provisioning so SoftAP scan/portal status is live. */
     display_task_start();
     status_led_task_start();
+    ESP_ERROR_CHECK(button_init(&cfg));
+    button_task_start();
 
     ESP_ERROR_CHECK(provisioning_apply_or_start(&cfg));
 
@@ -64,4 +67,5 @@ void app_main(void)
     } else {
         ESP_LOGI(TAG, "Ready. Provision via USB CDC serial console if needed.");
     }
+    ESP_LOGI(TAG, "BOOT button: press once for reset prompt, again within 5s to clear Wi-Fi.");
 }

@@ -30,3 +30,6 @@ const char *config_active_pass(const bridge_config_t *cfg);
 int config_find_profile(const bridge_config_t *cfg, const char *ssid);
 int config_add_profile(bridge_config_t *cfg, const char *ssid);
 void config_del_profile(bridge_config_t *cfg, int index);
+
+/* Wipe all Wi-Fi profiles in RAM (does not touch NVS until config_save). */
+void config_clear_wifi(bridge_config_t *cfg);
