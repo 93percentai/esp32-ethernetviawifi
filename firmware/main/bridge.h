@@ -18,7 +18,10 @@ typedef struct {
     float rate_to_wifi_bps;
 } bridge_stats_t;
 
-esp_err_t bridge_init(const uint8_t sta_mac[6]);
+/* nat_mode: when true the NCM interface is attached to the USB esp_netif and
+ * traffic is routed/NAPT'd instead of L2-bridged onto the Wi-Fi STA. */
+esp_err_t bridge_init(const uint8_t sta_mac[6], bool nat_mode);
+bool bridge_nat_mode(void);
 void bridge_set_wifi_up(bool up);
 void bridge_get_stats(bridge_stats_t *out);
 void bridge_reset_stats(void);

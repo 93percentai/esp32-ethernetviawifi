@@ -26,4 +26,13 @@ menu "USB Wi-Fi Bridge Configuration"
         help
             Use the on-board APA102 RGB LED for association state.
 
+    config BRIDGE_SD_BUS_WIDTH
+        int "SD/MMC bus width (1 or 4)"
+        range 1 4
+        default 1
+        help
+            SDMMC data-line width for the hidden TF slot. 1-line is the most
+            robust (fewer pins/pull-up constraints); 4-line is faster but needs
+            D1-D3 wired and pulled up. The T-Dongle-S3 exposes CLK/CMD/D0-D3.
+
 endmenu

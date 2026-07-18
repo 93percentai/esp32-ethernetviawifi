@@ -11,12 +11,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "class/net/net_device.h"
+#include "net_tether.h"
 #include "tinyusb.h"
 #include "tinyusb_net.h"
 
 static const char *TAG = "bridge";
 
 static bool s_wifi_up;
+static bool s_nat_mode;
 static uint8_t s_sta_mac[6];
 static SemaphoreHandle_t s_stats_lock;
 static bridge_stats_t s_stats;
@@ -68,6 +70,19 @@ static bool is_reflected(const uint8_t *frame, uint16_t len)
 static esp_err_t usb_recv_callback(void *buffer, uint16_t len, void *ctx)
 {
     (void)ctx;
+
+    if (s_nat_mode) {
+        /* Hand the frame to the USB esp_netif; lwIP routes + NAPTs it. */
+        net_tether_input(buffer, len);
+        stats_lock();
+        s_stats.bytes_to_wifi += len;
+        s_stats.frames_to_wifi++;
+        s_window_to_wifi += len;
+        rate_tick();
+        stats_unlock();
+        return ESP_OK;
+    }
+
     if (!s_wifi_up) {
         stats_lock();
         s_stats.drop_tx++;
@@ -89,10 +104,15 @@ static esp_err_t usb_recv_callback(void *buffer, uint16_t len, void *ctx)
     return ESP_OK;
 }
 
-static void wifi_pkt_free(void *eb, void *ctx)
+/* Unified TX-buffer free callback. In L2 mode the arg is a Wi-Fi RX buffer that
+ * must be returned to the driver; in NAT mode transmits pass arg=NULL and the
+ * lwIP pbuf is owned/freed by esp_netif, so there is nothing to free here. */
+static void usb_tx_free(void *arg, void *ctx)
 {
     (void)ctx;
-    esp_wifi_internal_free_rx_buffer(eb);
+    if (arg) {
+        esp_wifi_internal_free_rx_buffer(arg);
+    }
 }
 
 static esp_err_t pkt_wifi2usb(void *buffer, uint16_t len, void *eb)
@@ -123,50 +143,60 @@ static esp_err_t pkt_wifi2usb(void *buffer, uint16_t len, void *eb)
     return ESP_OK;
 }
 
-esp_err_t bridge_init(const uint8_t sta_mac[6])
+esp_err_t bridge_init(const uint8_t sta_mac[6], bool nat_mode)
 {
     memcpy(s_sta_mac, sta_mac, 6);
+    s_nat_mode = nat_mode;
     s_stats_lock = xSemaphoreCreateMutex();
     s_rate_window_us = esp_timer_get_time();
 
-    const tinyusb_config_t tusb_cfg = {
-        .device_descriptor = NULL,
-        .string_descriptor = NULL,
-        .external_phy = false,
-#if (TUD_OPT_HIGH_SPEED)
-        .fs_configuration_descriptor = NULL,
-        .hs_configuration_descriptor = NULL,
-        .qualifier_descriptor = NULL,
-#else
-        .configuration_descriptor = NULL,
-#endif
-    };
-    ESP_RETURN_ON_ERROR(tinyusb_driver_install(&tusb_cfg), TAG, "TinyUSB install failed");
-
+    /* TinyUSB driver install (composite descriptor) is owned by usb_gadget and
+     * must have already run before bridge_init. Here we only bind the NCM class. */
     tinyusb_net_config_t net_config = {
         .on_recv_callback = usb_recv_callback,
-        .free_tx_buffer = wifi_pkt_free,
+        .free_tx_buffer = usb_tx_free,
         .user_context = NULL,
     };
     memcpy(net_config.mac_addr, sta_mac, 6);
 
-    ESP_LOGI(TAG, "USB NCM MAC (host adopts STA): %02x:%02x:%02x:%02x:%02x:%02x",
+    ESP_LOGI(TAG, "USB NCM MAC (%s): %02x:%02x:%02x:%02x:%02x:%02x",
+             nat_mode ? "NAT tether" : "host adopts STA",
              sta_mac[0], sta_mac[1], sta_mac[2], sta_mac[3], sta_mac[4], sta_mac[5]);
 
     ESP_RETURN_ON_ERROR(tinyusb_net_init(TINYUSB_USBDEV_0, &net_config), TAG, "NCM init failed");
 
-    /*
-     * Keep NCM link down until Wi-Fi associates. Espressif's updated tusb_ncm
-     * example and IDFGH-17035 (Apple NCM DHCP) require this: hosts that DHCP
-     * only on the NETWORK_CONNECTION notification otherwise race the bridge.
-     */
-    tud_network_link_state(0, false);
-    s_wifi_up = false;
+    if (nat_mode) {
+        /* NAT: the USB link is always usable once enumerated; the host DHCPs
+         * from the ESP and reaches the LAN via NAPT regardless of STA state. */
+        ESP_ERROR_CHECK(net_tether_start(sta_mac));
+        tud_network_link_state(0, true);
+        s_wifi_up = true;  /* used only for stats/UI gating in NAT mode */
+    } else {
+        /*
+         * L2: keep NCM link down until Wi-Fi associates. Espressif's updated
+         * tusb_ncm example and IDFGH-17035 (Apple NCM DHCP) require this: hosts
+         * that DHCP only on the NETWORK_CONNECTION notification otherwise race
+         * an unready bridge.
+         */
+        tud_network_link_state(0, false);
+        s_wifi_up = false;
+    }
     return ESP_OK;
+}
+
+bool bridge_nat_mode(void)
+{
+    return s_nat_mode;
 }
 
 void bridge_set_wifi_up(bool up)
 {
+    if (s_nat_mode) {
+        /* In NAT mode the Wi-Fi RX path is owned by esp_netif/lwIP, not the raw
+         * L2 callback; NCM link state does not track STA association. */
+        s_wifi_up = up;
+        return;
+    }
     if (up && !s_wifi_up) {
         esp_wifi_internal_reg_rxcb(WIFI_IF_STA, pkt_wifi2usb);
         tud_network_link_state(0, true);

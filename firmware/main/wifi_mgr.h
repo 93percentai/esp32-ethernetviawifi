@@ -24,6 +24,9 @@ typedef struct {
     uint8_t channel;
     uint8_t mac[6];
     uint8_t bssid[6];
+    bool nat_mode;        /* true when running as NAT tether (ESP holds an IP) */
+    bool has_ip;          /* STA obtained a DHCP IP (NAT mode only) */
+    uint32_t sta_ip;      /* IPv4 address in network byte order (NAT mode) */
 } wifi_mgr_status_t;
 
 typedef struct {
@@ -33,8 +36,10 @@ typedef struct {
     uint8_t bssid[6];
 } wifi_scan_result_t;
 
-/* Start Wi-Fi driver and learn STA MAC; does not associate yet. */
-esp_err_t wifi_mgr_init(bridge_config_t *cfg);
+/* Start Wi-Fi driver and learn STA MAC; does not associate yet.
+ * nat_mode: create a default STA esp_netif so the ESP obtains its own DHCP IP
+ * (needed for the NAT tether + web/WebDAV/HID hosting). */
+esp_err_t wifi_mgr_init(bridge_config_t *cfg, bool nat_mode);
 /* Apply active profile and (re)associate. Call after USB bridge is ready. */
 esp_err_t wifi_mgr_apply(const bridge_config_t *cfg);
 void wifi_mgr_get_status(wifi_mgr_status_t *out);
