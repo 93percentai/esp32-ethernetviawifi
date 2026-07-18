@@ -449,9 +449,12 @@ static esp_err_t api_upload_post(httpd_req_t *req)
     }
     int written = recv_body_to_file(req, fs);
     if (written < 0) {
-        return send_json(req, "500 Internal Server Error", "{\"error\":\"write_failed\"}");
+        return send_json(req, "500 Internal Server Error",
+                         "{\"error\":\"write_failed\",\"msg\":\"Upload write failed\"}");
     }
-    return send_json(req, "200 OK", "{\"ok\":true}");
+    char buf[80];
+    snprintf(buf, sizeof(buf), "{\"ok\":true,\"bytes\":%d}", written);
+    return send_json(req, "200 OK", buf);
 }
 
 static esp_err_t api_delete_post(httpd_req_t *req)
@@ -830,11 +833,14 @@ static const char INDEX_HTML[] =
 ".busy{background:#3d2b0f;border-color:#9e6a00}"
 "button{background:#238636;color:#fff;border:0;border-radius:6px;padding:8px 12px;cursor:pointer;margin:2px}"
 "button.warn{background:#9e6a00}button.d{background:#6e2630}"
+"button:disabled{opacity:.5;cursor:not-allowed}"
 "a{color:#58a6ff;text-decoration:none}"
 "table{width:100%;border-collapse:collapse}td{padding:6px;border-bottom:1px solid #30363d}"
 ".r{text-align:right}.mut{color:#8b949e;font-size:12px}"
 "input[type=text]{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:8px;width:60%}"
 "#pad{width:100%;height:140px;background:#0d1117;border:1px dashed #30363d;border-radius:8px;touch-action:none;display:grid;place-items:center;color:#8b949e;user-select:none}"
+"#xferbar{display:none;height:8px;background:#0d1117;border:1px solid #30363d;border-radius:4px;margin-top:8px;overflow:hidden}"
+"#xferfill{height:100%;width:0;background:#238636;transition:width .1s linear}"
 "</style></head><body>"
 "<header>T-Dongle-S3 control</header><main>"
 "<div class=grid>"
@@ -848,8 +854,10 @@ static const char INDEX_HTML[] =
 "<div id=storageControls style=margin-top:8px></div></div>"
 "<div class=card id=filecard><div id=crumbs></div><table id=files></table>"
 "<div style=margin-top:8px><input type=text id=newdir placeholder=\"new folder\">"
-"<button onclick=mkdir()>mkdir</button>"
-"<input type=file id=fu><button onclick=upload()>upload</button></div></div>"
+"<button onclick=mkdir()>mkdir</button></div>"
+"<div style=margin-top:8px><input type=file id=fu>"
+"<button id=upbtn onclick=upload()>Upload</button></div>"
+"<div id=xfer class=mut></div><div id=xferbar><div id=xferfill></div></div></div>"
 "<div class=card id=hidcard style=\"display:none\"><b>HID remote</b>"
 "<div id=hidstate class=mut></div>"
 "<form id=hidform style=margin-top:8px><input type=text id=hidtext placeholder=\"Text to type on USB host\">"
@@ -874,7 +882,8 @@ static const char INDEX_HTML[] =
 "document.getElementById('hidcard').style.display=s.modes.hid?'block':'none';"
 "document.getElementById('hidstate').textContent=s.modes.hid?(s.hid.host_ready?'USB host ready':'Waiting for USB host'):'disabled';"
 "if(share){document.getElementById('sdinfo').textContent=s.sd.present?(s.sd.type+' '+s.sd.capacity_mb+' MB, owner='+s.sd.owner):'no card';"
-"document.getElementById('io').textContent='USB reads '+fmt(s.sd.usb_io.read_bytes)+' / writes '+fmt(s.sd.usb_io.write_bytes)+(s.sd.usb_io.active?' — ACTIVE':' — idle')+'; web I/O '+(s.sd.web_io.active?'ACTIVE':'idle');"
+"document.getElementById('io').textContent='USB reads '+fmt(s.sd.usb_io.read_bytes)+' / writes '+fmt(s.sd.usb_io.write_bytes)+(s.sd.usb_io.active?' — ACTIVE':' — idle')+"
+"' · web writes '+fmt(s.sd.web_io.write_bytes)+' / reads '+fmt(s.sd.web_io.read_bytes)+(s.sd.web_io.active?' — ACTIVE':' — idle');"
 "let b=document.getElementById('sdbanner'),c=document.getElementById('storageControls');b.className='';b.innerHTML='';c.innerHTML='';"
 "if(s.sd.present&&s.sd.owner!=='esp'){b.className='card busy';b.innerHTML='<b>SD is assigned to USB storage.</b> '+(s.sd.usb_io.active?'<span class=bad>USB transfer active.</span> ':'')+'<button class=warn onclick=takeover('+(s.sd.usb_io.active?'1':'0')+')>Use SD in web UI</button>';}"
 "else if(s.sd.owner==='esp'&&s.modes.msc){c.innerHTML='<button class=warn onclick=releaseToUsb('+(s.sd.web_io.active?'1':'0')+')>Give SD to USB</button>';}"
@@ -896,8 +905,27 @@ static const char INDEX_HTML[] =
 "function del(p){if(!confirm('Delete '+p+'?'))return;fetch('/api/delete?path='+encodeURIComponent(p),{method:'POST'}).then(()=>list(cwd));}"
 "function mkdir(){let n=document.getElementById('newdir').value;if(!n)return;let np=(cwd==='/'?'':cwd)+'/'+n;"
 "fetch('/api/mkdir?path='+encodeURIComponent(np),{method:'POST'}).then(()=>list(cwd));}"
-"function upload(){let f=document.getElementById('fu').files[0];if(!f)return;let np=(cwd==='/'?'':cwd)+'/'+f.name;"
-"fetch('/api/upload?path='+encodeURIComponent(np),{method:'POST',body:f}).then(()=>list(cwd));}"
+"function setXfer(t,bad,pct){let e=document.getElementById('xfer');e.textContent=t;e.className=bad?'bad':(pct>=100?'ok':'mut');"
+"let bar=document.getElementById('xferbar'),fill=document.getElementById('xferfill');"
+"if(pct==null){bar.style.display='none';fill.style.width='0';return}"
+"bar.style.display='block';fill.style.width=Math.max(0,Math.min(100,pct))+'%';fill.style.background=bad?'#f85149':'#238636'}"
+"function upload(){let inp=document.getElementById('fu'),btn=document.getElementById('upbtn'),f=inp.files[0];"
+"if(!f){setXfer('Choose a file to upload',true,null);return}"
+"if(btn.disabled)return;let np=(cwd==='/'?'':cwd)+'/'+f.name;btn.disabled=true;inp.disabled=true;"
+"setXfer('Starting upload of '+f.name+' ('+fmt(f.size)+')…',false,0);"
+"let xhr=new XMLHttpRequest();xhr.open('POST','/api/upload?path='+encodeURIComponent(np));"
+"xhr.upload.onprogress=e=>{if(e.lengthComputable&&e.total>0){let pct=Math.round(100*e.loaded/e.total);"
+"setXfer('Uploading '+f.name+': '+fmt(e.loaded)+' / '+fmt(e.total)+' ('+pct+'%)',false,pct)}"
+"else{setXfer('Uploading '+f.name+': '+fmt(e.loaded)+'…',false,null)}};"
+"xhr.onload=()=>{btn.disabled=false;inp.disabled=false;let ok=xhr.status>=200&&xhr.status<300,msg='';"
+"try{let d=JSON.parse(xhr.responseText||'{}');msg=d.msg||d.error||'';if(ok&&d.bytes!=null)msg='Uploaded '+f.name+' ('+fmt(d.bytes)+')'}"
+"catch(x){}if(ok){if(!msg)msg='Uploaded '+f.name+' ('+fmt(f.size)+')';setXfer(msg,false,100);inp.value='';list(cwd)}"
+"else{setXfer(msg||('Upload failed (HTTP '+xhr.status+')'),true,100)}};"
+"xhr.onerror=()=>{btn.disabled=false;inp.disabled=false;setXfer('Upload failed (network error)',true,100)};"
+"xhr.ontimeout=()=>{btn.disabled=false;inp.disabled=false;setXfer('Upload timed out',true,100)};"
+"xhr.send(f)}"
+"document.getElementById('fu').addEventListener('change',e=>{let f=e.target.files&&e.target.files[0];"
+"if(f)setXfer('Selected '+f.name+' ('+fmt(f.size)+') — click Upload',false,null);else setXfer('',false,null)});"
 "function feedback(t,bad){let e=document.getElementById('hidfeedback');e.textContent=t;e.className=bad?'bad':'mut'}"
 "async function hidType(){let t=document.getElementById('hidtext').value;if(!t)return;try{await j('/api/hid/text?enter='+(document.getElementById('hidenter').checked?'1':'0'),{method:'POST',body:t});feedback('Text queued',false)}catch(e){feedback(e.msg||e.error,true)}}"
 "async function hidKey(m,k){try{await j('/api/hid/key?mod='+m+'&kc='+k,{method:'POST'});feedback('Key queued',false)}catch(e){feedback(e.msg||e.error,true)}}"
