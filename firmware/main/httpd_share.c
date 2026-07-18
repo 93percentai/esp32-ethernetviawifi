@@ -312,12 +312,14 @@ static esp_err_t api_list_get(httpd_req_t *req)
     get_query(req, "path", rel, sizeof(rel));
     char fs[MAX_PATH_SZ];
     if (!build_fs_path(fs, sizeof(fs), rel)) {
-        return send_json(req, "400 Bad Request", "{\"error\":\"bad_path\"}");
+        return send_json(req, "400 Bad Request",
+                         "{\"error\":\"bad_path\",\"msg\":\"Invalid path\"}");
     }
 
     DIR *dir = opendir(fs);
     if (!dir) {
-        return send_json(req, "404 Not Found", "{\"error\":\"not_found\"}");
+        return send_json(req, "404 Not Found",
+                         "{\"error\":\"not_found\",\"msg\":\"Folder not found\"}");
     }
     web_op_begin();
 
@@ -475,8 +477,11 @@ static esp_err_t api_delete_post(httpd_req_t *req)
     if (stat(fs, &st) == 0) {
         rc = S_ISDIR(st.st_mode) ? rmdir(fs) : unlink(fs);
     }
-    return send_json(req, rc == 0 ? "200 OK" : "500 Internal Server Error",
-                     rc == 0 ? "{\"ok\":true}" : "{\"error\":\"delete_failed\"}");
+    if (rc == 0) {
+        return send_json(req, "200 OK", "{\"ok\":true,\"msg\":\"Deleted\"}");
+    }
+    return send_json(req, "500 Internal Server Error",
+                     "{\"error\":\"delete_failed\",\"msg\":\"Delete failed (missing or not empty)\"}");
 }
 
 static esp_err_t api_mkdir_post(httpd_req_t *req)
@@ -493,8 +498,11 @@ static esp_err_t api_mkdir_post(httpd_req_t *req)
         return send_json(req, "400 Bad Request", "{\"error\":\"bad_path\"}");
     }
     int rc = mkdir(fs, 0775);
-    return send_json(req, rc == 0 ? "200 OK" : "500 Internal Server Error",
-                     rc == 0 ? "{\"ok\":true}" : "{\"error\":\"mkdir_failed\"}");
+    if (rc == 0) {
+        return send_json(req, "200 OK", "{\"ok\":true,\"msg\":\"Folder created\"}");
+    }
+    return send_json(req, "500 Internal Server Error",
+                     "{\"error\":\"mkdir_failed\",\"msg\":\"Could not create folder\"}");
 }
 
 /* ------------------------------------------------------------------ */
@@ -866,12 +874,16 @@ static const char INDEX_HTML[] =
 "<div id=sdbanner></div>"
 "<div class=card id=storagecard><b>Storage</b> <span id=sdinfo class=mut></span><div id=io class=mut></div>"
 "<div id=storageControls style=margin-top:8px></div></div>"
-"<div class=card id=filecard><div id=crumbs></div><table id=files></table>"
+"<div class=card id=filecard>"
+"<div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap\">"
+"<div id=crumbs></div><button id=refreshbtn onclick=refreshFiles()>Refresh</button></div>"
+"<div id=filemsg class=mut style=margin:6px 0></div>"
+"<table id=files></table>"
 "<div style=margin-top:8px><input type=text id=newdir placeholder=\"new folder\">"
-"<button onclick=mkdir()>mkdir</button></div>"
+"<button id=mkdirbtn onclick=mkdir()>New folder</button></div>"
 "<div style=margin-top:8px><input type=file id=fu>"
 "<button id=upbtn onclick=upload()>Upload</button></div>"
-"<div id=xfer class=mut></div><div id=xferbar><div id=xferfill></div></div></div>"
+"<div id=xferbar><div id=xferfill></div></div></div>"
 "<div class=card id=hidcard style=\"display:none\"><b>HID remote</b>"
 "<div id=hidstate class=mut></div>"
 "<form id=hidform style=margin-top:8px><input type=text id=hidtext placeholder=\"Text to type on USB host\">"
@@ -881,10 +893,17 @@ static const char INDEX_HTML[] =
 "<div id=pad>Drag to move &bull; tap to left-click</div><div id=hidfeedback class=mut></div></div>"
 "<div class=mut id=davline>WebDAV: <span id=davurl></span>/dav/</div>"
 "</main><script>"
-"let cwd='/',lastOwner='',listed=false,current=null;"
-"async function j(u,o){let r=await fetch(u,o),d=await r.json().catch(()=>({error:'bad_response'}));if(!r.ok)throw d;return d}"
+"let cwd='/',lastOwner='',listed=false,current=null,fileBusy=false;"
+"async function j(u,o){let r=await fetch(u,o),d=await r.json().catch(()=>({error:'bad_response',msg:'Bad response'}));if(!r.ok)throw d;return d}"
 "function fmt(b){b=+b;if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';return (b/1048576).toFixed(1)+' MB'}"
 "function kv(id,a){document.getElementById(id).innerHTML=a.map(x=>'<span>'+x[0]+'</span><span>'+x[1]+'</span>').join('')}"
+"function errMsg(e){return (e&& (e.msg||e.error))||'Request failed'}"
+"function setFileMsg(t,bad){let e=document.getElementById('filemsg');e.textContent=t||'';e.className=bad?'bad':(/^(Uploaded|Deleted|Created|Folder|Selected|Ready)/.test(t||'')?'ok':'mut')}"
+"function setBusy(on){fileBusy=!!on;['upbtn','mkdirbtn','refreshbtn','fu','newdir'].forEach(id=>{let el=document.getElementById(id);if(el)el.disabled=!!on});"
+"document.querySelectorAll('#files button').forEach(b=>b.disabled=!!on)}"
+"function setProgress(pct,bad){let bar=document.getElementById('xferbar'),fill=document.getElementById('xferfill');"
+"if(pct==null){bar.style.display='none';fill.style.width='0';return}"
+"bar.style.display='block';fill.style.width=Math.max(0,Math.min(100,pct))+'%';fill.style.background=bad?'#f85149':'#238636'}"
 "async function status(){try{let s=await j('/api/status');current=s;"
 "kv('device',[['Wi-Fi',s.wifi.state],['SSID',s.wifi.ssid||'—'],['SD',s.sd.present?s.sd.type+' '+s.sd.capacity_mb+' MB':'not detected'],['SD owner',s.sd.owner]]);"
 "kv('network',[['Mode',s.modes.network.toUpperCase()],['STA IP',s.wifi.sta_ip||'—'],['USB IP',s.wifi.usb_ip||'—'],['RSSI',s.wifi.rssi+' dBm']]);"
@@ -902,44 +921,55 @@ static const char INDEX_HTML[] =
 "if(s.sd.present&&s.sd.owner!=='esp'){b.className='card busy';b.innerHTML='<b>SD is assigned to USB storage.</b> '+(s.sd.usb_io.active?'<span class=bad>USB transfer active.</span> ':'')+'<button class=warn onclick=takeover('+(s.sd.usb_io.active?'1':'0')+')>Use SD in web UI</button>';}"
 "else if(s.sd.owner==='esp'&&s.modes.msc){c.innerHTML='<button class=warn onclick=releaseToUsb('+(s.sd.web_io.active?'1':'0')+')>Give SD to USB</button>';}"
 "else if(s.sd.owner==='esp'&&!s.modes.msc){c.innerHTML='<span class=mut>Enable USB storage mode on the device before assigning the SD to USB.</span>';}"
-"if(s.sd.owner==='esp'&&(!listed||lastOwner!=='esp')){list(cwd);listed=true;}if(s.sd.owner!=='esp'){document.getElementById('files').innerHTML='';listed=false;}"
+"if(s.sd.owner==='esp'&&(!listed||lastOwner!=='esp')){listed=true;list(cwd,true);}if(s.sd.owner!=='esp'){document.getElementById('files').innerHTML='';listed=false;setFileMsg('SD is not available to the web UI',true);}"
 "lastOwner=s.sd.owner;}"
 "}catch(e){console.error(e)}}"
-"async function takeover(active){if(active&&!confirm('USB read/write activity is in progress. Interrupting it may corrupt data. Continue?'))return;try{await j('/api/sd/takeover',{method:'POST'});listed=false;await status()}catch(e){alert(e.msg||e.error)}}"
-"async function releaseToUsb(active){if(active&&!confirm('A web file operation was recently active. Give the SD to USB now?'))return;try{await j('/api/sd/release',{method:'POST'});document.getElementById('files').innerHTML='';listed=false;await status()}catch(e){alert(e.msg||e.error)}}"
-"function list(p){cwd=p;j('/api/list?path='+encodeURIComponent(p)).then(d=>{"
-"if(d.error){return}let t=document.getElementById('files');t.innerHTML='';"
-"document.getElementById('crumbs').innerHTML='<b>'+p+'</b> '+(p!=='/'?'<a href=# onclick=\"list(up())\">[up]</a>':'');"
-"d.entries.sort((a,b)=>b.dir-a.dir).forEach(e=>{let tr=document.createElement('tr');"
-"let np=(p==='/'?'':p)+'/'+e.name;"
-"tr.innerHTML=(e.dir?'<td>&#128193; <a href=# onclick=\"list(\\''+np+'\\')\">'+e.name+'</a></td><td class=r></td>':"
-"'<td>&#128196; <a href=\"/dl?path='+encodeURIComponent(np)+'\">'+e.name+'</a></td><td class=r>'+fmt(e.size)+'</td>')"
-"+'<td class=r><button class=d onclick=\"del(\\''+np+'\\')\">del</button></td>';t.appendChild(tr);});});}"
+"async function takeover(active){if(active&&!confirm('USB read/write activity is in progress. Interrupting it may corrupt data. Continue?'))return;try{setFileMsg('Taking SD for web UI…',false);await j('/api/sd/takeover',{method:'POST'});listed=false;await status();setFileMsg('SD ready for web UI',false)}catch(e){setFileMsg(errMsg(e),true)}}"
+"async function releaseToUsb(active){if(active&&!confirm('A web file operation was recently active. Give the SD to USB now?'))return;try{setFileMsg('Giving SD to USB…',false);await j('/api/sd/release',{method:'POST'});document.getElementById('files').innerHTML='';listed=false;await status();setFileMsg('SD assigned to USB storage',false)}catch(e){setFileMsg(errMsg(e),true)}}"
 "function up(){let x=cwd.replace(/\\/[^/]*$/,'');return x||'/'}"
-"function del(p){if(!confirm('Delete '+p+'?'))return;fetch('/api/delete?path='+encodeURIComponent(p),{method:'POST'}).then(()=>list(cwd));}"
-"function mkdir(){let n=document.getElementById('newdir').value;if(!n)return;let np=(cwd==='/'?'':cwd)+'/'+n;"
-"fetch('/api/mkdir?path='+encodeURIComponent(np),{method:'POST'}).then(()=>list(cwd));}"
-"function setXfer(t,bad,pct){let e=document.getElementById('xfer');e.textContent=t;e.className=bad?'bad':(pct>=100?'ok':'mut');"
-"let bar=document.getElementById('xferbar'),fill=document.getElementById('xferfill');"
-"if(pct==null){bar.style.display='none';fill.style.width='0';return}"
-"bar.style.display='block';fill.style.width=Math.max(0,Math.min(100,pct))+'%';fill.style.background=bad?'#f85149':'#238636'}"
-"function upload(){let inp=document.getElementById('fu'),btn=document.getElementById('upbtn'),f=inp.files[0];"
-"if(!f){setXfer('Choose a file to upload',true,null);return}"
-"if(btn.disabled)return;let np=(cwd==='/'?'':cwd)+'/'+f.name;btn.disabled=true;inp.disabled=true;"
-"setXfer('Starting upload of '+f.name+' ('+fmt(f.size)+')…',false,0);"
+"function refreshFiles(){return list(cwd,true)}"
+"async function list(p,showMsg){if(fileBusy&&showMsg)return;cwd=p;"
+"if(showMsg!==false)setFileMsg('Loading '+p+'…',false);"
+"try{let d=await j('/api/list?path='+encodeURIComponent(p));"
+"let t=document.getElementById('files');t.innerHTML='';"
+"document.getElementById('crumbs').innerHTML='Path <b>'+p+'</b> '+(p!=='/'?'<a href=# onclick=\"list(up(),true);return false\">[up]</a>':'');"
+"let entries=d.entries||[];entries.sort((a,b)=>b.dir-a.dir||a.name.localeCompare(b.name));"
+"if(!entries.length){t.innerHTML='<tr><td class=mut colspan=3>(empty folder)</td></tr>'}"
+"entries.forEach(e=>{let tr=document.createElement('tr');"
+"let np=(p==='/'?'':p)+'/'+e.name,safe=np.replace(/\\\\/g,'\\\\\\\\').replace(/'/g,\"\\\\'\");"
+"tr.innerHTML=(e.dir?'<td>&#128193; <a href=# onclick=\"list(\\''+safe+'\\',true);return false\">'+e.name+'</a></td><td class=r></td>':"
+"'<td>&#128196; <a href=\"/dl?path='+encodeURIComponent(np)+'\">'+e.name+'</a></td><td class=r>'+fmt(e.size)+'</td>')"
+"+'<td class=r><button class=d onclick=\"del(\\''+safe+'\\')\">Delete</button></td>';t.appendChild(tr);});"
+"if(showMsg!==false)setFileMsg(entries.length+' item'+(entries.length===1?'':'s')+' in '+p,false);"
+"}catch(e){document.getElementById('files').innerHTML='';setFileMsg(errMsg(e),true)}}"
+"async function del(p){if(fileBusy)return;if(!confirm('Delete '+p+'?'))return;"
+"setBusy(true);setFileMsg('Deleting '+p+'…',false);setProgress(null);"
+"try{await j('/api/delete?path='+encodeURIComponent(p),{method:'POST'});setBusy(false);"
+"setFileMsg('Deleted '+p,false);await list(cwd,false)}catch(e){setBusy(false);setFileMsg(errMsg(e),true)}}"
+"async function mkdir(){if(fileBusy)return;let n=(document.getElementById('newdir').value||'').trim();"
+"if(!n){setFileMsg('Enter a folder name',true);return}let np=(cwd==='/'?'':cwd)+'/'+n;"
+"setBusy(true);setFileMsg('Creating folder '+n+'…',false);setProgress(null);"
+"try{await j('/api/mkdir?path='+encodeURIComponent(np),{method:'POST'});"
+"document.getElementById('newdir').value='';setBusy(false);setFileMsg('Created folder '+n,false);await list(cwd,false)}"
+"catch(e){setBusy(false);setFileMsg(errMsg(e),true)}}"
+"function upload(){if(fileBusy)return;let inp=document.getElementById('fu'),btn=document.getElementById('upbtn'),f=inp.files[0];"
+"if(!f){setFileMsg('Choose a file to upload',true);return}"
+"let np=(cwd==='/'?'':cwd)+'/'+f.name;setBusy(true);"
+"setFileMsg('Starting upload of '+f.name+' ('+fmt(f.size)+')…',false);setProgress(0);"
 "let xhr=new XMLHttpRequest();xhr.open('POST','/api/upload?path='+encodeURIComponent(np));"
 "xhr.upload.onprogress=e=>{if(e.lengthComputable&&e.total>0){let pct=Math.round(100*e.loaded/e.total);"
-"setXfer('Uploading '+f.name+': '+fmt(e.loaded)+' / '+fmt(e.total)+' ('+pct+'%)',false,pct)}"
-"else{setXfer('Uploading '+f.name+': '+fmt(e.loaded)+'…',false,null)}};"
-"xhr.onload=()=>{btn.disabled=false;inp.disabled=false;let ok=xhr.status>=200&&xhr.status<300,msg='';"
+"setFileMsg('Uploading '+f.name+': '+fmt(e.loaded)+' / '+fmt(e.total)+' ('+pct+'%)',false);setProgress(pct)}"
+"else{setFileMsg('Uploading '+f.name+': '+fmt(e.loaded)+'…',false)}};"
+"xhr.onload=async()=>{let ok=xhr.status>=200&&xhr.status<300,msg='';"
 "try{let d=JSON.parse(xhr.responseText||'{}');msg=d.msg||d.error||'';if(ok&&d.bytes!=null)msg='Uploaded '+f.name+' ('+fmt(d.bytes)+')'}"
-"catch(x){}if(ok){if(!msg)msg='Uploaded '+f.name+' ('+fmt(f.size)+')';setXfer(msg,false,100);inp.value='';list(cwd)}"
-"else{setXfer(msg||('Upload failed (HTTP '+xhr.status+')'),true,100)}};"
-"xhr.onerror=()=>{btn.disabled=false;inp.disabled=false;setXfer('Upload failed (network error)',true,100)};"
-"xhr.ontimeout=()=>{btn.disabled=false;inp.disabled=false;setXfer('Upload timed out',true,100)};"
+"catch(x){}setBusy(false);if(ok){if(!msg)msg='Uploaded '+f.name+' ('+fmt(f.size)+')';setFileMsg(msg,false);setProgress(100);inp.value='';await list(cwd,false)}"
+"else{setFileMsg(msg||('Upload failed (HTTP '+xhr.status+')'),true);setProgress(100,true)}};"
+"xhr.onerror=()=>{setBusy(false);setFileMsg('Upload failed (network error)',true);setProgress(100,true)};"
+"xhr.ontimeout=()=>{setBusy(false);setFileMsg('Upload timed out',true);setProgress(100,true)};"
 "xhr.send(f)}"
 "document.getElementById('fu').addEventListener('change',e=>{let f=e.target.files&&e.target.files[0];"
-"if(f)setXfer('Selected '+f.name+' ('+fmt(f.size)+') — click Upload',false,null);else setXfer('',false,null)});"
+"if(f){setFileMsg('Selected '+f.name+' ('+fmt(f.size)+') — click Upload',false);setProgress(null)}else setFileMsg('',false)});"
+"document.getElementById('newdir').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();mkdir()}});"
 "function feedback(t,bad){let e=document.getElementById('hidfeedback');e.textContent=t;e.className=bad?'bad':'mut'}"
 "async function hidType(){let t=document.getElementById('hidtext').value;if(!t)return;try{await j('/api/hid/text?enter='+(document.getElementById('hidenter').checked?'1':'0'),{method:'POST',body:t});feedback('Text queued',false)}catch(e){feedback(e.msg||e.error,true)}}"
 "async function hidKey(m,k){try{await j('/api/hid/key?mod='+m+'&kc='+k,{method:'POST'});feedback('Key queued',false)}catch(e){feedback(e.msg||e.error,true)}}"
