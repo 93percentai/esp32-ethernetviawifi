@@ -47,6 +47,7 @@ static volatile int s_hold_pct;
 static volatile bool s_hold_reset_zone;
 static char s_msg1[24];
 static char s_msg2[24];
+static char s_hold_hint[24];
 
 static uint16_t swap565(uint16_t c)
 {
@@ -235,7 +236,9 @@ static void screen_sd(void)
 {
     char line[32];
     if (!sdcard_present()) {
-        fb_draw_text(2, 30, "No SD card", COLOR_WARN, COLOR_BG);
+        fb_draw_text(2, 28, "No SD card", COLOR_WARN, COLOR_BG);
+        snprintf(line, sizeof(line), "%.18s", sdcard_last_error());
+        fb_draw_text(2, 42, line, COLOR_MUTED, COLOR_BG);
         mode_hint();
         return;
     }
@@ -367,6 +370,12 @@ static void render_overlay(void)
 static void draw_hold_bar(void)
 {
     if (!s_hold_active) return;
+    if (s_hold_hint[0]) {
+        /* Clear the hint row then draw it just above the bar. */
+        fb_fill_rect(0, BOARD_LCD_V_RES - 18, BOARD_LCD_H_RES, 10, COLOR_BG);
+        fb_draw_text(2, BOARD_LCD_V_RES - 17, s_hold_hint,
+                     s_hold_reset_zone ? COLOR_ERR : COLOR_ACCENT, COLOR_BG);
+    }
     int w = (BOARD_LCD_H_RES - 4) * s_hold_pct / 100;
     if (w < 0) w = 0;
     if (w > BOARD_LCD_H_RES - 4) w = BOARD_LCD_H_RES - 4;
@@ -383,7 +392,9 @@ static void render(void)
 
     provisioning_lcd_status_t prov;
     provisioning_get_lcd_status(&prov);
-    if (prov.active) {
+    /* While provisioning, show the setup screen on the overview/network slots
+     * but keep the mode screens reachable (e.g. to enable USB-SD without Wi-Fi). */
+    if (prov.active && (s_screen == SCREEN_OVERVIEW || s_screen == SCREEN_NETWORK)) {
         render_conf(&prov);
         draw_hold_bar();
         goto flush;
@@ -434,6 +445,15 @@ void display_set_hold(bool active, int pct, bool reset_zone)
     s_hold_active = active;
     s_hold_pct = pct;
     s_hold_reset_zone = reset_zone;
+    if (!active) {
+        s_hold_hint[0] = '\0';
+    }
+}
+
+void display_set_hold_hint(const char *hint)
+{
+    strncpy(s_hold_hint, hint ? hint : "", sizeof(s_hold_hint) - 1);
+    s_hold_hint[sizeof(s_hold_hint) - 1] = '\0';
 }
 
 static void display_task(void *arg)
@@ -509,5 +529,6 @@ void display_set_message(const char *l1, const char *l2) { (void)l1; (void)l2; }
 void display_next_screen(void) {}
 display_screen_t display_current_screen(void) { return SCREEN_OVERVIEW; }
 void display_set_hold(bool active, int pct, bool reset_zone) { (void)active; (void)pct; (void)reset_zone; }
+void display_set_hold_hint(const char *hint) { (void)hint; }
 
 #endif

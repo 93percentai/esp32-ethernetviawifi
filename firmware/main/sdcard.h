@@ -39,6 +39,8 @@ esp_err_t sdcard_init(void);
 bool sdcard_present(void);
 uint64_t sdcard_capacity_bytes(void);
 const char *sdcard_type_str(void);
+/* esp_err_to_name() of the last init result (for on-screen diagnostics). */
+const char *sdcard_last_error(void);
 
 /* Raw sector access (used by the USB MSC callbacks). Updates I/O counters. */
 esp_err_t sdcard_read_sectors(uint32_t start_sector, uint32_t count, void *dst);

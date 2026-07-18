@@ -25,7 +25,38 @@ static const char *TAG = "button";
 
 static bridge_config_t *s_cfg;
 static bool s_reset_armed;
+static bool s_action_fired;   /* an action already fired during the current hold */
 static int64_t s_reset_deadline_ms;
+
+static bool is_mode_screen(display_screen_t s)
+{
+    return s == SCREEN_SD || s == SCREEN_SHARE || s == SCREEN_HID;
+}
+
+/* Live hint shown while holding, so the user knows exactly when to release. */
+static void update_hold_hint(display_screen_t scr, int64_t held)
+{
+    char hint[24];
+    if (is_mode_screen(scr)) {
+        bool on;
+        const char *name;
+        if (scr == SCREEN_SD)        { on = config_usb_func_enabled(s_cfg, USB_FUNC_MSC); name = "USB SD"; }
+        else if (scr == SCREEN_HID)  { on = config_usb_func_enabled(s_cfg, USB_FUNC_HID); name = "HID"; }
+        else                         { on = config_share_enabled(s_cfg);                  name = "SHARE"; }
+        if (held >= HOLD_TOGGLE_MS) {
+            snprintf(hint, sizeof(hint), "release: %s %s", name, on ? "OFF" : "ON");
+        } else {
+            snprintf(hint, sizeof(hint), "hold 2s: %s %s", name, on ? "OFF" : "ON");
+        }
+    } else {
+        if (held >= HOLD_RESET_MS) {
+            snprintf(hint, sizeof(hint), "release: FACTORY RESET");
+        } else {
+            snprintf(hint, sizeof(hint), "hold 5s: reset");
+        }
+    }
+    display_set_hold_hint(hint);
+}
 
 static int64_t now_ms(void)
 {
@@ -138,35 +169,44 @@ static void button_task(void *arg)
         /* Press edge. */
         if (stable && !last_stable) {
             press_start_ms = t;
+            s_action_fired = false;
         }
 
-        /* While held: drive the progress bar. */
-        if (stable) {
+        /* While held: drive the progress bar and fire the hold action as soon
+         * as its threshold is reached (immediate feedback, no need to guess
+         * when 2 s has elapsed). Mode screens toggle at 2 s; other screens arm
+         * the factory reset at 5 s — the two gestures never overlap. */
+        if (stable && !s_action_fired) {
             int64_t held = t - press_start_ms;
-            int pct = (int)(held * 100 / HOLD_RESET_MS);
+            display_screen_t scr = display_current_screen();
+            int pct = (int)(held * 100 / (is_mode_screen(scr) ? HOLD_TOGGLE_MS : HOLD_RESET_MS));
             if (pct > 100) pct = 100;
-            display_set_hold(true, pct, held >= HOLD_RESET_MS);
+            display_set_hold(true, pct, !is_mode_screen(scr) && held >= HOLD_RESET_MS);
+            update_hold_hint(scr, held);
+
+            if (is_mode_screen(scr) && held >= HOLD_TOGGLE_MS && !s_reset_armed) {
+                s_action_fired = true;
+                display_set_hold(false, 0, false);
+                toggle_current_mode();  /* saves + reboots; does not return */
+            } else if (!is_mode_screen(scr) && held >= HOLD_RESET_MS && !s_reset_armed) {
+                s_action_fired = true;
+                display_set_hold(false, 0, false);
+                s_reset_armed = true;
+                s_reset_deadline_ms = t + RESET_CONFIRM_MS;
+                display_set_overlay(DISPLAY_OVERLAY_RESET_CONFIRM, RESET_CONFIRM_MS / 1000);
+                ESP_LOGI(TAG, "Reset armed: tap again within %d s", RESET_CONFIRM_MS / 1000);
+            }
         }
 
         /* Release edge. */
         if (!stable && last_stable) {
-            int64_t held = t - press_start_ms;
             display_set_hold(false, 0, false);
-
-            if (s_reset_armed) {
-                /* Second press within the window confirms the reset. */
+            if (s_action_fired) {
+                /* Action already handled during the hold (toggle/reset-arm). */
+            } else if (s_reset_armed) {
+                /* A tap within the window confirms the pending factory reset. */
                 s_reset_armed = false;
-                do_factory_reset();
-                /* unreachable */
-            } else if (held >= HOLD_RESET_MS) {
-                /* Long hold: arm factory reset, wait for a confirming tap. */
-                s_reset_armed = true;
-                s_reset_deadline_ms = t + RESET_CONFIRM_MS;
-                display_set_overlay(DISPLAY_OVERLAY_RESET_CONFIRM, RESET_CONFIRM_MS / 1000);
-                ESP_LOGI(TAG, "Reset armed: press again within %d s", RESET_CONFIRM_MS / 1000);
-            } else if (held >= HOLD_TOGGLE_MS) {
-                /* Medium hold on a mode screen: toggle that mode. */
-                toggle_current_mode();
+                do_factory_reset();  /* unreachable */
             } else {
                 /* Short tap: advance to the next info screen. */
                 display_next_screen();

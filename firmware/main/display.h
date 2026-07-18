@@ -38,3 +38,6 @@ display_screen_t display_current_screen(void);
 /* Button hold feedback: active shows a progress bar; reset_zone tints it red
  * once the hold has crossed the factory-reset threshold. pct is 0..100. */
 void display_set_hold(bool active, int pct, bool reset_zone);
+
+/* Short hint shown above the hold bar (e.g. "release: MSC ON"). "" clears it. */
+void display_set_hold_hint(const char *hint);

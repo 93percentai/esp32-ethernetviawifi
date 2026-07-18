@@ -28,6 +28,7 @@ static const char *BASE_PATH = "/sd";
 static sdmmc_host_t s_host;
 static sdmmc_card_t *s_card;
 static bool s_present;
+static esp_err_t s_init_err = ESP_ERR_NOT_FOUND;
 static volatile sd_owner_t s_owner = SD_OWNER_NONE;
 
 static SemaphoreHandle_t s_stats_lock;
@@ -79,30 +80,36 @@ esp_err_t sdcard_init(void)
     esp_err_t err = sdmmc_host_init();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "sdmmc_host_init failed: %s", esp_err_to_name(err));
+        s_init_err = err;
         return err;
     }
     err = sdmmc_host_init_slot(s_host.slot, &slot);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "sdmmc_host_init_slot failed: %s", esp_err_to_name(err));
+        s_init_err = err;
         sdmmc_host_deinit();
         return err;
     }
 
     s_card = calloc(1, sizeof(sdmmc_card_t));
     if (!s_card) {
+        s_init_err = ESP_ERR_NO_MEM;
         sdmmc_host_deinit();
         return ESP_ERR_NO_MEM;
     }
 
     err = sdmmc_card_init(&s_host, s_card);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "No SD card (%s)", esp_err_to_name(err));
+        ESP_LOGW(TAG, "No SD card / init failed (%s), width=%d",
+                 esp_err_to_name(err), CONFIG_BRIDGE_SD_BUS_WIDTH);
+        s_init_err = err;
         free(s_card);
         s_card = NULL;
         sdmmc_host_deinit();
         return ESP_ERR_NOT_FOUND;
     }
 
+    s_init_err = ESP_OK;
     s_present = true;
     ESP_LOGI(TAG, "SD card: %llu MB, %u-byte sectors, width=%d",
              sdcard_capacity_bytes() / (1024ULL * 1024ULL),
@@ -121,6 +128,11 @@ uint64_t sdcard_capacity_bytes(void)
         return 0;
     }
     return (uint64_t)s_card->csd.capacity * s_card->csd.sector_size;
+}
+
+const char *sdcard_last_error(void)
+{
+    return esp_err_to_name(s_init_err);
 }
 
 const char *sdcard_type_str(void)

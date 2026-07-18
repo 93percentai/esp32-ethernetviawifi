@@ -60,10 +60,9 @@ void app_main(void)
     ESP_ERROR_CHECK(display_init());
     ESP_ERROR_CHECK(status_led_init());
 
-    /* Probe the SD card early so USB MSC can present it (best-effort). */
-    if (msc || share) {
-        sdcard_init();
-    }
+    /* Always probe the SD card so the SD screen reflects reality and MSC/share
+     * can be enabled at runtime for an already-inserted card (best-effort). */
+    sdcard_init();
 
     /*
      * Boot order:
