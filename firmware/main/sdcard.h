@@ -48,6 +48,14 @@ esp_err_t sdcard_write_sectors(uint32_t start_sector, uint32_t count, const void
 uint32_t sdcard_sector_count(void);
 uint32_t sdcard_sector_size(void);
 
+/*
+ * First usable MBR FAT/data partition size in MB (0 if super-floppy / unknown).
+ * When this is much smaller than sdcard_capacity_bytes(), the host will only see
+ * that small volume even though MSC exposes the whole card — reformat the card
+ * on a PC to use the full capacity.
+ */
+uint32_t sdcard_partition_mb(void);
+
 /* Single-owner arbiter. Switching to ESP mounts FATFS; switching to HOST (or
  * NONE) unmounts it so the host can safely own the raw block device. */
 sd_owner_t sdcard_owner(void);

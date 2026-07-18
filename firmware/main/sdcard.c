@@ -6,12 +6,14 @@
 #include "diskio_impl.h"
 #include "diskio_sdmmc.h"
 #include "driver/sdmmc_host.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "ff.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "msc.h"
 #include "sd_protocol_defs.h"
 #include "sdkconfig.h"
 #include "sdmmc_cmd.h"
@@ -30,6 +32,7 @@ static sdmmc_card_t *s_card;
 static bool s_present;
 static esp_err_t s_init_err = ESP_ERR_NOT_FOUND;
 static volatile sd_owner_t s_owner = SD_OWNER_NONE;
+static uint32_t s_partition_mb;
 
 static SemaphoreHandle_t s_stats_lock;
 static struct {
@@ -54,6 +57,8 @@ static void stats_unlock(void)
         xSemaphoreGive(s_stats_lock);
     }
 }
+
+static void sdcard_probe_partitions(void);
 
 esp_err_t sdcard_init(void)
 {
@@ -111,9 +116,12 @@ esp_err_t sdcard_init(void)
 
     s_init_err = ESP_OK;
     s_present = true;
-    ESP_LOGI(TAG, "SD card: %llu MB, %u-byte sectors, width=%d",
+    sdmmc_card_print_info(stdout, s_card);
+    ESP_LOGI(TAG, "SD card: %llu MB, %lu sectors x %u bytes, width=%d",
              sdcard_capacity_bytes() / (1024ULL * 1024ULL),
+             (unsigned long)sdcard_sector_count(),
              (unsigned)sdcard_sector_size(), CONFIG_BRIDGE_SD_BUS_WIDTH);
+    sdcard_probe_partitions();
     return ESP_OK;
 }
 
@@ -148,12 +156,17 @@ const char *sdcard_type_str(void)
 
 uint32_t sdcard_sector_count(void)
 {
-    return s_present ? s_card->csd.capacity : 0;
+    return s_present ? (uint32_t)s_card->csd.capacity : 0;
 }
 
 uint32_t sdcard_sector_size(void)
 {
-    return s_present ? s_card->csd.sector_size : 0;
+    return s_present ? (uint32_t)s_card->csd.sector_size : 0;
+}
+
+uint32_t sdcard_partition_mb(void)
+{
+    return s_partition_mb;
 }
 
 esp_err_t sdcard_read_sectors(uint32_t start_sector, uint32_t count, void *dst)
@@ -186,6 +199,57 @@ esp_err_t sdcard_write_sectors(uint32_t start_sector, uint32_t count, const void
         stats_unlock();
     }
     return err;
+}
+
+static void sdcard_probe_partitions(void)
+{
+    s_partition_mb = 0;
+    if (!s_present || s_card->csd.sector_size != 512) {
+        return;
+    }
+    uint8_t *mbr = heap_caps_malloc(512, MALLOC_CAP_DMA);
+    if (!mbr) {
+        return;
+    }
+    if (sdmmc_read_sectors(s_card, mbr, 0, 1) != ESP_OK) {
+        free(mbr);
+        return;
+    }
+    if (mbr[510] != 0x55 || mbr[511] != 0xAA) {
+        ESP_LOGI(TAG, "No MBR signature (super-floppy or unformatted)");
+        free(mbr);
+        return;
+    }
+    for (int i = 0; i < 4; i++) {
+        const uint8_t *p = mbr + 446 + i * 16;
+        uint8_t type = p[4];
+        uint32_t start = (uint32_t)p[8] | ((uint32_t)p[9] << 8) |
+                         ((uint32_t)p[10] << 16) | ((uint32_t)p[11] << 24);
+        uint32_t sectors = (uint32_t)p[12] | ((uint32_t)p[13] << 8) |
+                           ((uint32_t)p[14] << 16) | ((uint32_t)p[15] << 24);
+        if (type == 0 || sectors == 0) {
+            continue;
+        }
+        uint32_t mb = (uint32_t)(((uint64_t)sectors * 512ULL) / (1024ULL * 1024ULL));
+        ESP_LOGI(TAG, "MBR part %d: type=0x%02x start=%lu size=%lu MB",
+                 i + 1, type, (unsigned long)start, (unsigned long)mb);
+        /* Prefer the first FAT-like / Linux partition as the visible volume size. */
+        if (s_partition_mb == 0 &&
+            (type == 0x01 || type == 0x04 || type == 0x06 || type == 0x0B ||
+             type == 0x0C || type == 0x0E || type == 0x0F || type == 0x83)) {
+            s_partition_mb = mb;
+        }
+    }
+    if (s_partition_mb > 0) {
+        uint32_t card_mb = (uint32_t)(sdcard_capacity_bytes() / (1024ULL * 1024ULL));
+        if (s_partition_mb + 64 < card_mb) {
+            ESP_LOGW(TAG,
+                     "FAT partition is only %lu MB but card is %lu MB — host will "
+                     "only show the small volume until the card is reformatted",
+                     (unsigned long)s_partition_mb, (unsigned long)card_mb);
+        }
+    }
+    free(mbr);
 }
 
 sd_owner_t sdcard_owner(void)
@@ -238,13 +302,15 @@ esp_err_t sdcard_take_esp(void)
 
     FRESULT fr = f_mount(fs, drv, 1);
     if (fr != FR_OK) {
-        ESP_LOGE(TAG, "f_mount failed (%d) — card may be unformatted", fr);
+        ESP_LOGE(TAG, "f_mount failed (%d) — card may be unformatted/exFAT", fr);
         esp_vfs_fat_unregister_path(BASE_PATH);
         ff_diskio_unregister(pdrv);
         return ESP_FAIL;
     }
 
     s_owner = SD_OWNER_ESP;
+    /* Host must drop any cached view of the raw device. */
+    msc_notify_media_changed();
     ESP_LOGI(TAG, "SD FAT mounted at %s (owner=ESP)", BASE_PATH);
     return ESP_OK;
 }
@@ -252,16 +318,22 @@ esp_err_t sdcard_take_esp(void)
 esp_err_t sdcard_release_to_host(void)
 {
     if (s_owner == SD_OWNER_ESP) {
-        esp_vfs_fat_unregister_path(BASE_PATH);
         BYTE pdrv = ff_diskio_get_pdrv_card(s_card);
         if (pdrv != 0xFF) {
             char drv[3] = { (char)('0' + pdrv), ':', 0 };
+            /* Unmount first so FatFS flushes cached writes before the host owns the card. */
             f_mount(0, drv, 0);
             ff_diskio_unregister(pdrv);
         }
+        esp_vfs_fat_unregister_path(BASE_PATH);
         ESP_LOGI(TAG, "SD FAT unmounted (owner=HOST)");
     }
     s_owner = s_present ? SD_OWNER_HOST : SD_OWNER_NONE;
+    msc_notify_media_changed();
+    /* Re-probe partition table — host may have reformatted while it owned the card. */
+    if (s_present) {
+        sdcard_probe_partitions();
+    }
     return ESP_OK;
 }
 

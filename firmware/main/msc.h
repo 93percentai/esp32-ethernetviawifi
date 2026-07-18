@@ -6,3 +6,6 @@
  * to be pulled from the static archive so those callbacks are linked in.
  */
 void msc_register(void);
+
+/* Call after SD ownership changes so the USB host re-reads capacity/contents. */
+void msc_notify_media_changed(void);

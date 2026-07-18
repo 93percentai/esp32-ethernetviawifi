@@ -224,6 +224,7 @@ static esp_err_t api_status_get(httpd_req_t *req)
              "\"frames_to_host\":%lu,\"frames_to_wifi\":%lu,"
              "\"drop_tx\":%lu,\"drop_rx\":%lu,\"drop_reflected\":%lu},"
              "\"sd\":{\"present\":%s,\"type\":\"%s\",\"capacity_mb\":%llu,"
+             "\"sectors\":%lu,\"sector_size\":%u,\"partition_mb\":%lu,"
              "\"owner\":\"%s\",\"fs_mounted\":%s,"
              "\"usb_io\":{\"active\":%s,\"read_bytes\":%llu,\"write_bytes\":%llu,"
              "\"ms_since_read\":%u,\"ms_since_write\":%u},"
@@ -251,6 +252,9 @@ static esp_err_t api_status_get(httpd_req_t *req)
              sdcard_present() ? "true" : "false",
              sdcard_type_str(),
              (unsigned long long)(sdcard_capacity_bytes() / (1024ULL * 1024ULL)),
+             (unsigned long)sdcard_sector_count(),
+             (unsigned)sdcard_sector_size(),
+             (unsigned long)sdcard_partition_mb(),
              owner,
              sdcard_fs_mounted() ? "true" : "false",
              io.active ? "true" : "false",
@@ -914,11 +918,12 @@ static const char INDEX_HTML[] =
 "document.getElementById('davline').style.display=share?'block':'none';"
 "document.getElementById('hidcard').style.display=s.modes.hid?'block':'none';"
 "document.getElementById('hidstate').textContent=s.modes.hid?(s.hid.host_ready?'USB host ready':'Waiting for USB host')+' · sent '+s.hid.sent_reports+' · dropped '+s.hid.dropped:'disabled';"
-"if(share){document.getElementById('sdinfo').textContent=s.sd.present?(s.sd.type+' '+s.sd.capacity_mb+' MB, owner='+s.sd.owner):'no card';"
+"if(share){document.getElementById('sdinfo').textContent=s.sd.present?(s.sd.type+' '+s.sd.capacity_mb+' MB raw'+(s.sd.partition_mb?(', FAT ~'+s.sd.partition_mb+' MB'):'')+', owner='+s.sd.owner):'no card';"
 "document.getElementById('io').textContent='USB reads '+fmt(s.sd.usb_io.read_bytes)+' / writes '+fmt(s.sd.usb_io.write_bytes)+(s.sd.usb_io.active?' — ACTIVE':' — idle')+"
 "' · web writes '+fmt(s.sd.web_io.write_bytes)+' / reads '+fmt(s.sd.web_io.read_bytes)+(s.sd.web_io.active?' — ACTIVE':' — idle');"
 "let b=document.getElementById('sdbanner'),c=document.getElementById('storageControls');b.className='';b.innerHTML='';c.innerHTML='';"
-"if(s.sd.present&&s.sd.owner!=='esp'){b.className='card busy';b.innerHTML='<b>SD is assigned to USB storage.</b> '+(s.sd.usb_io.active?'<span class=bad>USB transfer active.</span> ':'')+'<button class=warn onclick=takeover('+(s.sd.usb_io.active?'1':'0')+')>Use SD in web UI</button>';}"
+"if(s.sd.present&&s.sd.partition_mb&&s.sd.partition_mb+64<s.sd.capacity_mb){b.className='card busy';b.innerHTML='<b>SD FAT partition is only '+s.sd.partition_mb+' MB</b> of '+s.sd.capacity_mb+' MB raw. USB mass storage will show that small volume (and its files). Reformat the card on a PC as one FAT32 volume to use the full card.';}"
+"if(s.sd.present&&s.sd.owner!=='esp'){b.className='card busy';b.innerHTML=(b.innerHTML?b.innerHTML+'<br>':'')+'<b>SD is assigned to USB storage.</b> '+(s.sd.usb_io.active?'<span class=bad>USB transfer active.</span> ':'')+'<button class=warn onclick=takeover('+(s.sd.usb_io.active?'1':'0')+')>Use SD in web UI</button>';}"
 "else if(s.sd.owner==='esp'&&s.modes.msc){c.innerHTML='<button class=warn onclick=releaseToUsb('+(s.sd.web_io.active?'1':'0')+')>Give SD to USB</button>';}"
 "else if(s.sd.owner==='esp'&&!s.modes.msc){c.innerHTML='<span class=mut>Enable USB storage mode on the device before assigning the SD to USB.</span>';}"
 "if(s.sd.owner==='esp'&&(!listed||lastOwner!=='esp')){listed=true;list(cwd,true);}if(s.sd.owner!=='esp'){document.getElementById('files').innerHTML='';listed=false;setFileMsg('SD is not available to the web UI',true);}"
