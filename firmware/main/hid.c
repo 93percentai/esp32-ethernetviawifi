@@ -14,8 +14,9 @@
 static const char *TAG = "hid";
 
 typedef enum {
-    HID_EV_KEY = 0,
+    HID_EV_KEY_TAP = 0,
     HID_EV_MOUSE,
+    HID_EV_LEFT_CLICK,
 } hid_ev_type_t;
 
 typedef struct {
@@ -36,6 +37,8 @@ typedef struct {
 
 static QueueHandle_t s_queue;
 static volatile int64_t s_last_activity_us = -1;
+static portMUX_TYPE s_stats_lock = portMUX_INITIALIZER_UNLOCKED;
+static hid_stats_t s_stats;
 
 /* ASCII -> HID usage + shift flag (TinyUSB provided table). */
 static const uint8_t s_ascii2kc[128][2] = { HID_ASCII_TO_KEYCODE };
@@ -43,6 +46,17 @@ static const uint8_t s_ascii2kc[128][2] = { HID_ASCII_TO_KEYCODE };
 bool hid_host_ready(void)
 {
     return usb_gadget_func_active(USB_FUNC_HID) && tud_mounted() && tud_hid_ready();
+}
+
+void hid_get_stats(hid_stats_t *out)
+{
+    if (!out) {
+        return;
+    }
+    portENTER_CRITICAL(&s_stats_lock);
+    *out = s_stats;
+    portEXIT_CRITICAL(&s_stats_lock);
+    out->queue_depth = s_queue ? (uint32_t)uxQueueMessagesWaiting(s_queue) : 0;
 }
 
 uint32_t hid_ms_since_activity(void)
@@ -78,6 +92,9 @@ static void send_key(uint8_t modifier, uint8_t keycode)
     uint8_t keys[6] = { keycode, 0, 0, 0, 0, 0 };
     tud_hid_keyboard_report(HID_REPORT_ID_KEYBOARD, modifier, keycode ? keys : NULL);
     s_last_activity_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_stats_lock);
+    s_stats.sent_reports++;
+    portEXIT_CRITICAL(&s_stats_lock);
 }
 
 static void send_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
@@ -87,6 +104,9 @@ static void send_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
     }
     tud_hid_mouse_report(HID_REPORT_ID_MOUSE, buttons, dx, dy, wheel, 0);
     s_last_activity_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_stats_lock);
+    s_stats.sent_reports++;
+    portEXIT_CRITICAL(&s_stats_lock);
 }
 
 static void hid_task(void *arg)
@@ -100,10 +120,16 @@ static void hid_task(void *arg)
         if (!usb_gadget_func_active(USB_FUNC_HID)) {
             continue;
         }
-        if (ev.type == HID_EV_KEY) {
+        if (ev.type == HID_EV_KEY_TAP) {
             send_key(ev.key.modifier, ev.key.keycode);
-        } else {
+            vTaskDelay(pdMS_TO_TICKS(8));
+            send_key(0, 0);
+        } else if (ev.type == HID_EV_MOUSE) {
             send_mouse(ev.mouse.buttons, ev.mouse.dx, ev.mouse.dy, ev.mouse.wheel);
+        } else {
+            send_mouse(MOUSE_BUTTON_LEFT, 0, 0, 0);
+            vTaskDelay(pdMS_TO_TICKS(8));
+            send_mouse(0, 0, 0, 0);
         }
         /* Small spacing so hosts register discrete events. */
         vTaskDelay(pdMS_TO_TICKS(8));
@@ -124,41 +150,59 @@ esp_err_t hid_init(void)
     return ESP_OK;
 }
 
-static void queue_ev(const hid_event_t *ev)
+static esp_err_t queue_ev(const hid_event_t *ev)
 {
-    if (s_queue) {
-        xQueueSend(s_queue, ev, 0);
+    if (!s_queue) {
+        return ESP_ERR_INVALID_STATE;
     }
+    if (xQueueSend(s_queue, ev, 0) != pdTRUE) {
+        portENTER_CRITICAL(&s_stats_lock);
+        s_stats.dropped_events++;
+        portEXIT_CRITICAL(&s_stats_lock);
+        return ESP_ERR_NO_MEM;
+    }
+    portENTER_CRITICAL(&s_stats_lock);
+    s_stats.queued_events++;
+    portEXIT_CRITICAL(&s_stats_lock);
+    return ESP_OK;
 }
 
-void hid_queue_key(uint8_t modifier, uint8_t keycode)
+esp_err_t hid_queue_key(uint8_t modifier, uint8_t keycode)
 {
-    hid_event_t press = { .type = HID_EV_KEY, .key = { modifier, keycode } };
-    hid_event_t release = { .type = HID_EV_KEY, .key = { 0, 0 } };
-    queue_ev(&press);
-    queue_ev(&release);
+    hid_event_t tap = { .type = HID_EV_KEY_TAP, .key = { modifier, keycode } };
+    return queue_ev(&tap);
 }
 
-void hid_queue_text(const char *utf8)
+esp_err_t hid_queue_text(const char *utf8, bool press_enter_after)
 {
     if (!utf8) {
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
+    esp_err_t result = ESP_OK;
     for (const char *p = utf8; *p; p++) {
         uint8_t c = (uint8_t)*p;
         if (c >= 128) {
             continue;  /* non-ASCII not mapped */
         }
-        uint8_t keycode = s_ascii2kc[c][0];
-        uint8_t modifier = s_ascii2kc[c][1] ? KEYBOARD_MODIFIER_LEFTSHIFT : 0;
+        /* TinyUSB's HID_ASCII_TO_KEYCODE entries are
+         * { shift_required, HID keycode }, in that order. */
+        uint8_t keycode = s_ascii2kc[c][1];
+        uint8_t modifier = s_ascii2kc[c][0] ? KEYBOARD_MODIFIER_LEFTSHIFT : 0;
         if (keycode == 0) {
             continue;
         }
-        hid_queue_key(modifier, keycode);
+        if (hid_queue_key(modifier, keycode) != ESP_OK) {
+            result = ESP_ERR_NO_MEM;
+            break;
+        }
     }
+    if (result == ESP_OK && press_enter_after) {
+        result = hid_queue_key(0, HID_KEY_ENTER);
+    }
+    return result;
 }
 
-void hid_queue_mouse(uint8_t buttons, int dx, int dy, int wheel)
+esp_err_t hid_queue_mouse(uint8_t buttons, int dx, int dy, int wheel)
 {
     hid_event_t ev = {
         .type = HID_EV_MOUSE,
@@ -169,7 +213,13 @@ void hid_queue_mouse(uint8_t buttons, int dx, int dy, int wheel)
             .wheel = (int8_t)(wheel < -127 ? -127 : (wheel > 127 ? 127 : wheel)),
         },
     };
-    queue_ev(&ev);
+    return queue_ev(&ev);
+}
+
+esp_err_t hid_queue_left_click(void)
+{
+    hid_event_t ev = { .type = HID_EV_LEFT_CLICK };
+    return queue_ev(&ev);
 }
 
 /* ---- TinyUSB HID class callbacks ---- */

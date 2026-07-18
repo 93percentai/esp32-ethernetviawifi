@@ -184,18 +184,23 @@ static void screen_overview(void)
     fb_draw_text(2, 28, "SSID", COLOR_MUTED, COLOR_BG);
     fb_draw_text(42, 28, line, COLOR_TEXT, COLOR_BG);
 
+    bool acm = usb_gadget_func_active(USB_FUNC_ACM);
+    fb_draw_text(2, 40, "ACM", COLOR_MUTED, COLOR_BG);
+    fb_draw_text(42, 40, acm ? "ON" : "OFF",
+                 acm ? COLOR_OK : COLOR_MUTED, COLOR_BG);
+
     char bytes[12], rate[12];
     bridge_format_bytes(stats.bytes_to_host, bytes, sizeof(bytes));
     bridge_format_rate(stats.rate_to_host_bps, rate, sizeof(rate));
     snprintf(line, sizeof(line), "%.10s %.10s", bytes, rate);
-    fb_draw_text(2, 44, "DN", COLOR_OK, COLOR_BG);
-    fb_draw_text(26, 44, line, COLOR_TEXT, COLOR_BG);
+    fb_draw_text(2, 52, "DN", COLOR_OK, COLOR_BG);
+    fb_draw_text(26, 52, line, COLOR_TEXT, COLOR_BG);
 
     bridge_format_bytes(stats.bytes_to_wifi, bytes, sizeof(bytes));
     bridge_format_rate(stats.rate_to_wifi_bps, rate, sizeof(rate));
     snprintf(line, sizeof(line), "%.10s %.10s", bytes, rate);
-    fb_draw_text(2, 56, "UP", COLOR_WARN, COLOR_BG);
-    fb_draw_text(26, 56, line, COLOR_TEXT, COLOR_BG);
+    fb_draw_text(2, 64, "UP", COLOR_WARN, COLOR_BG);
+    fb_draw_text(26, 64, line, COLOR_TEXT, COLOR_BG);
 }
 
 static void screen_network(void)
@@ -272,7 +277,7 @@ static void screen_share(void)
 {
     wifi_mgr_status_t st;
     wifi_mgr_get_status(&st);
-    bool on = httpd_share_running();
+    bool on = httpd_share_storage_enabled();
 
     fb_draw_text(2, 16, "WEB+DAV", COLOR_MUTED, COLOR_BG);
     fb_draw_text(66, 16, on ? "ON" : "OFF", on ? COLOR_OK : COLOR_MUTED, COLOR_BG);

@@ -105,7 +105,7 @@ void app_main(void)
 
     /* Web file share / HID control server (needs the NAT tether IP path). */
     if ((share || hid) && !provisioning_is_active()) {
-        httpd_share_start();
+        httpd_share_start(share);
     }
 
     ESP_LOGI(TAG, "Modes: NCM(%s) ACM=%d MSC=%d HID=%d SHARE=%d",

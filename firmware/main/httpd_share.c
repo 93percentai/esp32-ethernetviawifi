@@ -7,17 +7,27 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "bridge.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "hid.h"
+#include "net_tether.h"
 #include "sdcard.h"
 #include "usb_gadget.h"
+#include "wifi_mgr.h"
 
 static const char *TAG = "httpd_share";
 static httpd_handle_t s_server;
+static bool s_storage_share_enabled;
+static volatile uint32_t s_web_ops;
+static volatile uint64_t s_web_read_bytes;
+static volatile uint64_t s_web_write_bytes;
+static volatile int64_t s_web_last_io_us = -1;
 
 #define XFER_BUF_SZ 2048
 #define MAX_PATH_SZ 320
+#define WEB_ACTIVE_WINDOW_MS 1500
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -74,7 +84,38 @@ static bool build_fs_path(char *out, size_t out_sz, const char *rel)
 
 static bool sd_ready(void)
 {
-    return sdcard_present() && sdcard_owner() == SD_OWNER_ESP;
+    return s_storage_share_enabled && sdcard_present() && sdcard_owner() == SD_OWNER_ESP;
+}
+
+static void web_op_begin(void)
+{
+    s_web_ops++;
+}
+
+static void web_op_end(void)
+{
+    if (s_web_ops > 0) {
+        s_web_ops--;
+    }
+}
+
+static void web_io_add(bool write, size_t bytes)
+{
+    if (write) {
+        s_web_write_bytes += bytes;
+    } else {
+        s_web_read_bytes += bytes;
+    }
+    s_web_last_io_us = esp_timer_get_time();
+}
+
+static uint32_t web_ms_since_io(void)
+{
+    if (s_web_last_io_us < 0) {
+        return UINT32_MAX;
+    }
+    int64_t ms = (esp_timer_get_time() - s_web_last_io_us) / 1000;
+    return ms < 0 ? 0 : (ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ms);
 }
 
 static esp_err_t send_json(httpd_req_t *req, const char *status, const char *json)
@@ -115,41 +156,124 @@ static bool get_query(httpd_req_t *req, const char *key, char *out, size_t out_s
 }
 
 /* ------------------------------------------------------------------ */
-/* SD status + ownership control                                      */
+/* Device status + SD ownership control                               */
 /* ------------------------------------------------------------------ */
 
-static esp_err_t api_sdstatus_get(httpd_req_t *req)
+static const char *wifi_state_name(wifi_mgr_state_t state)
+{
+    switch (state) {
+    case WIFI_MGR_IDLE: return "idle";
+    case WIFI_MGR_CONNECTING: return "connecting";
+    case WIFI_MGR_CONNECTED: return "connected";
+    case WIFI_MGR_DISCONNECTED: return "disconnected";
+    case WIFI_MGR_NO_AP: return "no_ap";
+    case WIFI_MGR_BAD_AUTH: return "bad_auth";
+    case WIFI_MGR_SCANNING: return "scanning";
+    case WIFI_MGR_PROVISIONING: return "provisioning";
+    default: return "unknown";
+    }
+}
+
+static void format_ip(uint32_t addr, char *out, size_t out_len)
+{
+    snprintf(out, out_len, "%u.%u.%u.%u",
+             (unsigned)(addr & 0xff), (unsigned)((addr >> 8) & 0xff),
+             (unsigned)((addr >> 16) & 0xff), (unsigned)((addr >> 24) & 0xff));
+}
+
+static esp_err_t api_status_get(httpd_req_t *req)
 {
     sd_io_stats_t io;
     sdcard_get_io_stats(&io);
+    hid_stats_t hid_stats;
+    hid_get_stats(&hid_stats);
+    bridge_stats_t bridge;
+    bridge_get_stats(&bridge);
+    wifi_mgr_status_t wifi;
+    wifi_mgr_get_status(&wifi);
+
     const char *owner = "none";
     switch (sdcard_owner()) {
     case SD_OWNER_HOST: owner = "host"; break;
     case SD_OWNER_ESP:  owner = "esp";  break;
     default: owner = "none"; break;
     }
-    char buf[512];
+
+    char sta_ip[20] = "";
+    char usb_ip[20] = "";
+    if (wifi.has_ip) {
+        format_ip(wifi.sta_ip, sta_ip, sizeof(sta_ip));
+    }
+    esp_netif_ip_info_t usb;
+    net_tether_get_usb_ip(&usb);
+    if (usb.ip.addr) {
+        format_ip(usb.ip.addr, usb_ip, sizeof(usb_ip));
+    }
+
+    uint32_t web_ms = web_ms_since_io();
+    bool web_active = s_web_ops > 0 || web_ms < WEB_ACTIVE_WINDOW_MS;
+    char buf[1800];
     snprintf(buf, sizeof(buf),
-             "{\"present\":%s,\"type\":\"%s\",\"capacity_mb\":%llu,\"owner\":\"%s\","
-             "\"fs_mounted\":%s,\"msc_enabled\":%s,\"hid_enabled\":%s,"
-             "\"io\":{\"active\":%s,\"read_bytes\":%llu,\"write_bytes\":%llu,"
-             "\"ms_since_read\":%u,\"ms_since_write\":%u}}",
+             "{"
+             "\"modes\":{\"ncm\":true,\"acm\":%s,\"msc\":%s,\"hid\":%s,"
+             "\"share\":%s,\"http_server\":%s,\"network\":\"%s\"},"
+             "\"wifi\":{\"state\":\"%s\",\"ssid\":\"%.32s\",\"rssi\":%d,"
+             "\"sta_ip\":\"%s\",\"usb_ip\":\"%s\"},"
+             "\"bridge\":{\"down_bytes\":%llu,\"up_bytes\":%llu,"
+             "\"down_bps\":%.0f,\"up_bps\":%.0f,"
+             "\"frames_to_host\":%lu,\"frames_to_wifi\":%lu,"
+             "\"drop_tx\":%lu,\"drop_rx\":%lu,\"drop_reflected\":%lu},"
+             "\"sd\":{\"present\":%s,\"type\":\"%s\",\"capacity_mb\":%llu,"
+             "\"owner\":\"%s\",\"fs_mounted\":%s,"
+             "\"usb_io\":{\"active\":%s,\"read_bytes\":%llu,\"write_bytes\":%llu,"
+             "\"ms_since_read\":%u,\"ms_since_write\":%u},"
+             "\"web_io\":{\"active\":%s,\"operations\":%lu,"
+             "\"read_bytes\":%llu,\"write_bytes\":%llu,\"ms_since_io\":%u}},"
+             "\"hid\":{\"host_ready\":%s,\"last_activity_ms\":%u,"
+             "\"queued\":%lu,\"sent_reports\":%lu,\"dropped\":%lu,\"queue_depth\":%lu}"
+             "}",
+             usb_gadget_func_active(USB_FUNC_ACM) ? "true" : "false",
+             usb_gadget_func_active(USB_FUNC_MSC) ? "true" : "false",
+             usb_gadget_func_active(USB_FUNC_HID) ? "true" : "false",
+             s_storage_share_enabled ? "true" : "false",
+             s_server ? "true" : "false",
+             bridge_nat_mode() ? "nat" : "l2",
+             wifi_state_name(wifi.state), wifi.ssid, wifi.rssi,
+             sta_ip, usb_ip,
+             (unsigned long long)bridge.bytes_to_host,
+             (unsigned long long)bridge.bytes_to_wifi,
+             (double)bridge.rate_to_host_bps, (double)bridge.rate_to_wifi_bps,
+             (unsigned long)bridge.frames_to_host,
+             (unsigned long)bridge.frames_to_wifi,
+             (unsigned long)bridge.drop_tx,
+             (unsigned long)bridge.drop_rx,
+             (unsigned long)bridge.drop_refl,
              sdcard_present() ? "true" : "false",
              sdcard_type_str(),
              (unsigned long long)(sdcard_capacity_bytes() / (1024ULL * 1024ULL)),
              owner,
              sdcard_fs_mounted() ? "true" : "false",
-             usb_gadget_func_active(USB_FUNC_MSC) ? "true" : "false",
-             usb_gadget_func_active(USB_FUNC_HID) ? "true" : "false",
              io.active ? "true" : "false",
              (unsigned long long)io.read_bytes, (unsigned long long)io.write_bytes,
-             (unsigned)io.ms_since_read, (unsigned)io.ms_since_write);
+             (unsigned)io.ms_since_read, (unsigned)io.ms_since_write,
+             web_active ? "true" : "false", (unsigned long)s_web_ops,
+             (unsigned long long)s_web_read_bytes,
+             (unsigned long long)s_web_write_bytes, (unsigned)web_ms,
+             hid_host_ready() ? "true" : "false",
+             (unsigned)hid_ms_since_activity(),
+             (unsigned long)hid_stats.queued_events,
+             (unsigned long)hid_stats.sent_reports,
+             (unsigned long)hid_stats.dropped_events,
+             (unsigned long)hid_stats.queue_depth);
     return send_json(req, "200 OK", buf);
 }
 
 /* Force the on-device share to take the card from the USB host. */
 static esp_err_t api_sd_takeover_post(httpd_req_t *req)
 {
+    if (!s_storage_share_enabled) {
+        return send_json(req, "409 Conflict", "{\"error\":\"share_disabled\"}");
+    }
     if (!sdcard_present()) {
         return send_json(req, "409 Conflict", "{\"error\":\"no_card\"}");
     }
@@ -163,6 +287,14 @@ static esp_err_t api_sd_takeover_post(httpd_req_t *req)
 /* Release the card back to the USB host. */
 static esp_err_t api_sd_release_post(httpd_req_t *req)
 {
+    if (!usb_gadget_func_active(USB_FUNC_MSC)) {
+        return send_json(req, "409 Conflict",
+                         "{\"error\":\"msc_disabled\",\"msg\":\"USB storage mode is not enabled\"}");
+    }
+    if (s_web_ops > 0) {
+        return send_json(req, "409 Conflict",
+                         "{\"error\":\"web_busy\",\"msg\":\"A web file operation is active\"}");
+    }
     sdcard_release_to_host();
     return send_json(req, "200 OK", "{\"ok\":true,\"owner\":\"host\"}");
 }
@@ -187,6 +319,7 @@ static esp_err_t api_list_get(httpd_req_t *req)
     if (!dir) {
         return send_json(req, "404 Not Found", "{\"error\":\"not_found\"}");
     }
+    web_op_begin();
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -213,6 +346,7 @@ static esp_err_t api_list_get(httpd_req_t *req)
         first = false;
     }
     closedir(dir);
+    web_op_end();
     httpd_resp_sendstr_chunk(req, "]}");
     httpd_resp_sendstr_chunk(req, NULL);
     return ESP_OK;
@@ -235,6 +369,7 @@ static esp_err_t api_download_get(httpd_req_t *req)
     if (!f) {
         return send_json(req, "404 Not Found", "{\"error\":\"not_found\"}");
     }
+    web_op_begin();
     httpd_resp_set_type(req, "application/octet-stream");
     const char *base = strrchr(fs, '/');
     char disp[MAX_PATH_SZ];
@@ -244,6 +379,7 @@ static esp_err_t api_download_get(httpd_req_t *req)
     char *buf = malloc(XFER_BUF_SZ);
     if (!buf) {
         fclose(f);
+        web_op_end();
         return ESP_ERR_NO_MEM;
     }
     size_t n;
@@ -251,9 +387,11 @@ static esp_err_t api_download_get(httpd_req_t *req)
         if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
             break;
         }
+        web_io_add(false, n);
     }
     free(buf);
     fclose(f);
+    web_op_end();
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
@@ -265,9 +403,11 @@ static int recv_body_to_file(httpd_req_t *req, const char *fs_path)
     if (!f) {
         return -1;
     }
+    web_op_begin();
     char *buf = malloc(XFER_BUF_SZ);
     if (!buf) {
         fclose(f);
+        web_op_end();
         return -1;
     }
     int remaining = req->content_len;
@@ -280,14 +420,17 @@ static int recv_body_to_file(httpd_req_t *req, const char *fs_path)
             }
             free(buf);
             fclose(f);
+            web_op_end();
             return -1;
         }
         fwrite(buf, 1, r, f);
+        web_io_add(true, (size_t)r);
         remaining -= r;
         total += r;
     }
     free(buf);
     fclose(f);
+    web_op_end();
     return total;
 }
 
@@ -355,10 +498,32 @@ static esp_err_t api_mkdir_post(httpd_req_t *req)
 /* HID remote control endpoints                                       */
 /* ------------------------------------------------------------------ */
 
-static esp_err_t api_hid_text_post(httpd_req_t *req)
+static esp_err_t hid_require_ready(httpd_req_t *req)
 {
     if (!usb_gadget_func_active(USB_FUNC_HID)) {
-        return send_json(req, "409 Conflict", "{\"error\":\"hid_disabled\"}");
+        return send_json(req, "409 Conflict",
+                         "{\"error\":\"hid_disabled\",\"msg\":\"HID mode is disabled\"}");
+    }
+    if (!hid_host_ready()) {
+        return send_json(req, "409 Conflict",
+                         "{\"error\":\"host_not_ready\",\"msg\":\"USB HID host is not ready\"}");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t hid_queue_response(httpd_req_t *req, esp_err_t err)
+{
+    if (err == ESP_OK) {
+        return send_json(req, "200 OK", "{\"ok\":true}");
+    }
+    return send_json(req, "503 Service Unavailable",
+                     "{\"error\":\"queue_full\",\"msg\":\"HID event queue is full\"}");
+}
+
+static esp_err_t api_hid_text_post(httpd_req_t *req)
+{
+    if (!usb_gadget_func_active(USB_FUNC_HID) || !hid_host_ready()) {
+        return hid_require_ready(req);
     }
     char body[256];
     int len = req->content_len < (int)sizeof(body) - 1 ? req->content_len : (int)sizeof(body) - 1;
@@ -367,34 +532,43 @@ static esp_err_t api_hid_text_post(httpd_req_t *req)
         return send_json(req, "400 Bad Request", "{\"error\":\"no_body\"}");
     }
     body[r] = '\0';
-    hid_queue_text(body);
-    return send_json(req, "200 OK", "{\"ok\":true}");
+    char enter[4] = "0";
+    get_query(req, "enter", enter, sizeof(enter));
+    return hid_queue_response(req, hid_queue_text(body, enter[0] == '1'));
 }
 
 static esp_err_t api_hid_key_post(httpd_req_t *req)
 {
-    if (!usb_gadget_func_active(USB_FUNC_HID)) {
-        return send_json(req, "409 Conflict", "{\"error\":\"hid_disabled\"}");
+    if (!usb_gadget_func_active(USB_FUNC_HID) || !hid_host_ready()) {
+        return hid_require_ready(req);
     }
     char mods[8] = "0", kc[8] = "0";
     get_query(req, "mod", mods, sizeof(mods));
     get_query(req, "kc", kc, sizeof(kc));
-    hid_queue_key((uint8_t)atoi(mods), (uint8_t)atoi(kc));
-    return send_json(req, "200 OK", "{\"ok\":true}");
+    return hid_queue_response(req,
+                              hid_queue_key((uint8_t)atoi(mods), (uint8_t)atoi(kc)));
 }
 
 static esp_err_t api_hid_mouse_post(httpd_req_t *req)
 {
-    if (!usb_gadget_func_active(USB_FUNC_HID)) {
-        return send_json(req, "409 Conflict", "{\"error\":\"hid_disabled\"}");
+    if (!usb_gadget_func_active(USB_FUNC_HID) || !hid_host_ready()) {
+        return hid_require_ready(req);
     }
     char dx[8] = "0", dy[8] = "0", btn[8] = "0", wh[8] = "0";
     get_query(req, "dx", dx, sizeof(dx));
     get_query(req, "dy", dy, sizeof(dy));
     get_query(req, "btn", btn, sizeof(btn));
     get_query(req, "wheel", wh, sizeof(wh));
-    hid_queue_mouse((uint8_t)atoi(btn), atoi(dx), atoi(dy), atoi(wh));
-    return send_json(req, "200 OK", "{\"ok\":true}");
+    return hid_queue_response(req,
+                              hid_queue_mouse((uint8_t)atoi(btn), atoi(dx), atoi(dy), atoi(wh)));
+}
+
+static esp_err_t api_hid_click_post(httpd_req_t *req)
+{
+    if (!usb_gadget_func_active(USB_FUNC_HID) || !hid_host_ready()) {
+        return hid_require_ready(req);
+    }
+    return hid_queue_response(req, hid_queue_left_click());
 }
 
 /* ------------------------------------------------------------------ */
@@ -523,9 +697,11 @@ static esp_err_t dav_get(httpd_req_t *req)
         fclose(f);
         return httpd_resp_send(req, NULL, 0);
     }
+    web_op_begin();
     char *buf = malloc(XFER_BUF_SZ);
     if (!buf) {
         fclose(f);
+        web_op_end();
         return ESP_ERR_NO_MEM;
     }
     size_t n;
@@ -533,9 +709,11 @@ static esp_err_t dav_get(httpd_req_t *req)
         if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
             break;
         }
+        web_io_add(false, n);
     }
     free(buf);
     fclose(f);
+    web_op_end();
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
@@ -641,11 +819,14 @@ static esp_err_t dav_dispatch(httpd_req_t *req)
 static const char INDEX_HTML[] =
 "<!DOCTYPE html><html><head><meta charset=utf-8>"
 "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
-"<title>T-Dongle SD</title><style>"
+"<title>T-Dongle-S3</title><style>"
 "body{font-family:system-ui,sans-serif;margin:0;background:#0f1720;color:#e6edf3}"
 "header{background:#161b22;padding:10px 16px;font-weight:600}"
 "main{padding:16px;max-width:900px;margin:0 auto}"
 ".card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin:10px 0}"
+".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}"
+".grid .card{margin:0}.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;font-size:13px}"
+".kv span:nth-child(odd){color:#8b949e}.ok{color:#3fb950}.bad{color:#f85149}"
 ".busy{background:#3d2b0f;border-color:#9e6a00}"
 "button{background:#238636;color:#fff;border:0;border-radius:6px;padding:8px 12px;cursor:pointer;margin:2px}"
 "button.warn{background:#9e6a00}button.d{background:#6e2630}"
@@ -653,35 +834,56 @@ static const char INDEX_HTML[] =
 "table{width:100%;border-collapse:collapse}td{padding:6px;border-bottom:1px solid #30363d}"
 ".r{text-align:right}.mut{color:#8b949e;font-size:12px}"
 "input[type=text]{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:8px;width:60%}"
-"#pad{width:100%;height:140px;background:#0d1117;border:1px dashed #30363d;border-radius:8px;touch-action:none}"
+"#pad{width:100%;height:140px;background:#0d1117;border:1px dashed #30363d;border-radius:8px;touch-action:none;display:grid;place-items:center;color:#8b949e;user-select:none}"
 "</style></head><body>"
-"<header>T-Dongle-S3 &mdash; SD &amp; HID</header><main>"
+"<header>T-Dongle-S3 control</header><main>"
+"<div class=grid>"
+"<div class=card><b>Device state</b><div class=kv id=device></div></div>"
+"<div class=card><b>Network</b><div class=kv id=network></div></div>"
+"<div class=card><b>USB modes</b><div class=kv id=modes></div></div>"
+"<div class=card><b>Traffic</b><div class=kv id=traffic></div></div>"
+"</div>"
 "<div id=sdbanner></div>"
-"<div class=card><b>Storage</b> <span id=sdinfo class=mut></span><div id=io class=mut></div></div>"
-"<div class=card><div id=crumbs></div><table id=files></table>"
+"<div class=card id=storagecard><b>Storage</b> <span id=sdinfo class=mut></span><div id=io class=mut></div>"
+"<div id=storageControls style=margin-top:8px></div></div>"
+"<div class=card id=filecard><div id=crumbs></div><table id=files></table>"
 "<div style=margin-top:8px><input type=text id=newdir placeholder=\"new folder\">"
 "<button onclick=mkdir()>mkdir</button>"
 "<input type=file id=fu><button onclick=upload()>upload</button></div></div>"
-"<div class=card id=hidcard><b>HID remote</b><div class=mut>type text / move mouse on the plugged-in host</div>"
-"<div style=margin-top:8px><input type=text id=hidtext placeholder=\"text to type\">"
-"<button onclick=hidType()>send</button>"
-"<button onclick=hidKey(0,40)>Enter</button><button onclick=hidKey(0,43)>Tab</button>"
-"<button onclick=hidKey(1,4)>Ctrl?</button></div>"
-"<div id=pad title=\"drag to move mouse\"></div></div>"
-"<div class=mut>WebDAV: <span id=davurl></span>/dav/</div>"
+"<div class=card id=hidcard style=\"display:none\"><b>HID remote</b>"
+"<div id=hidstate class=mut></div>"
+"<form id=hidform style=margin-top:8px><input type=text id=hidtext placeholder=\"Text to type on USB host\">"
+"<label><input type=checkbox id=hidenter> Press Enter afterward</label>"
+"<button type=submit>Type text</button></form>"
+"<div><span class=mut>Special keys:</span> <button onclick=hidKey(0,43)>Tab</button></div>"
+"<div id=pad>Drag to move &bull; tap to left-click</div><div id=hidfeedback class=mut></div></div>"
+"<div class=mut id=davline>WebDAV: <span id=davurl></span>/dav/</div>"
 "</main><script>"
-"let cwd='/';"
-"function j(u,o){return fetch(u,o).then(r=>r.json())}"
+"let cwd='/',lastOwner='',listed=false,current=null;"
+"async function j(u,o){let r=await fetch(u,o),d=await r.json().catch(()=>({error:'bad_response'}));if(!r.ok)throw d;return d}"
 "function fmt(b){b=+b;if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';return (b/1048576).toFixed(1)+' MB'}"
-"function status(){j('/api/sdstatus').then(s=>{"
-"document.getElementById('sdinfo').textContent=s.present?(s.type+' '+s.capacity_mb+' MB, owner='+s.owner):'no card';"
-"document.getElementById('io').textContent='reads '+fmt(s.io.read_bytes)+' / writes '+fmt(s.io.write_bytes)+(s.io.active?' — ACTIVE':' — idle');"
-"let b=document.getElementById('sdbanner');"
-"if(s.present&&s.owner!=='esp'){b.className='card busy';b.innerHTML='<b>SD in use by USB storage.</b> '+(s.io.active?'<span style=color:#f85149>Transfer in progress!</span> ':'')+'<button class=warn onclick=takeover('+(s.io.active?'1':'0')+')>Force unmount &amp; edit here</button>';}"
-"else{b.className='';b.innerHTML='';if(s.owner==='esp')list(cwd);}"
-"});}"
-"function takeover(active){if(active&&!confirm('A host read/write is in progress. Forcing may corrupt data or interrupt the transfer. Continue?'))return;"
-"fetch('/api/sd/takeover',{method:'POST'}).then(()=>setTimeout(status,300));}"
+"function kv(id,a){document.getElementById(id).innerHTML=a.map(x=>'<span>'+x[0]+'</span><span>'+x[1]+'</span>').join('')}"
+"async function status(){try{let s=await j('/api/status');current=s;"
+"kv('device',[['Wi-Fi',s.wifi.state],['SSID',s.wifi.ssid||'—'],['SD',s.sd.present?s.sd.type+' '+s.sd.capacity_mb+' MB':'not detected'],['SD owner',s.sd.owner]]);"
+"kv('network',[['Mode',s.modes.network.toUpperCase()],['STA IP',s.wifi.sta_ip||'—'],['USB IP',s.wifi.usb_ip||'—'],['RSSI',s.wifi.rssi+' dBm']]);"
+"kv('modes',[['NCM','ON'],['ACM',s.modes.acm?'ON':'OFF'],['USB storage',s.modes.msc?'ON':'OFF'],['HID',s.modes.hid?'ON':'OFF'],['WebDAV/share',s.modes.share?'ON':'OFF']]);"
+"kv('traffic',[['Download',fmt(s.bridge.down_bytes)+' / '+fmt(s.bridge.down_bps)+'/s'],['Upload',fmt(s.bridge.up_bytes)+' / '+fmt(s.bridge.up_bps)+'/s'],['Frames',s.bridge.frames_to_host+' / '+s.bridge.frames_to_wifi],['Drops',s.bridge.drop_tx+' / '+s.bridge.drop_rx]]);"
+"let share=s.modes.share;document.getElementById('storagecard').style.display=share?'block':'none';"
+"document.getElementById('filecard').style.display=share&&s.sd.owner==='esp'?'block':'none';"
+"document.getElementById('davline').style.display=share?'block':'none';"
+"document.getElementById('hidcard').style.display=s.modes.hid?'block':'none';"
+"document.getElementById('hidstate').textContent=s.modes.hid?(s.hid.host_ready?'USB host ready':'Waiting for USB host'):'disabled';"
+"if(share){document.getElementById('sdinfo').textContent=s.sd.present?(s.sd.type+' '+s.sd.capacity_mb+' MB, owner='+s.sd.owner):'no card';"
+"document.getElementById('io').textContent='USB reads '+fmt(s.sd.usb_io.read_bytes)+' / writes '+fmt(s.sd.usb_io.write_bytes)+(s.sd.usb_io.active?' — ACTIVE':' — idle')+'; web I/O '+(s.sd.web_io.active?'ACTIVE':'idle');"
+"let b=document.getElementById('sdbanner'),c=document.getElementById('storageControls');b.className='';b.innerHTML='';c.innerHTML='';"
+"if(s.sd.present&&s.sd.owner!=='esp'){b.className='card busy';b.innerHTML='<b>SD is assigned to USB storage.</b> '+(s.sd.usb_io.active?'<span class=bad>USB transfer active.</span> ':'')+'<button class=warn onclick=takeover('+(s.sd.usb_io.active?'1':'0')+')>Use SD in web UI</button>';}"
+"else if(s.sd.owner==='esp'&&s.modes.msc){c.innerHTML='<button class=warn onclick=releaseToUsb('+(s.sd.web_io.active?'1':'0')+')>Give SD to USB</button>';}"
+"else if(s.sd.owner==='esp'&&!s.modes.msc){c.innerHTML='<span class=mut>Enable USB storage mode on the device before assigning the SD to USB.</span>';}"
+"if(s.sd.owner==='esp'&&(!listed||lastOwner!=='esp')){list(cwd);listed=true;}if(s.sd.owner!=='esp'){document.getElementById('files').innerHTML='';listed=false;}"
+"lastOwner=s.sd.owner;}"
+"}catch(e){console.error(e)}}"
+"async function takeover(active){if(active&&!confirm('USB read/write activity is in progress. Interrupting it may corrupt data. Continue?'))return;try{await j('/api/sd/takeover',{method:'POST'});listed=false;await status()}catch(e){alert(e.msg||e.error)}}"
+"async function releaseToUsb(active){if(active&&!confirm('A web file operation was recently active. Give the SD to USB now?'))return;try{await j('/api/sd/release',{method:'POST'});document.getElementById('files').innerHTML='';listed=false;await status()}catch(e){alert(e.msg||e.error)}}"
 "function list(p){cwd=p;j('/api/list?path='+encodeURIComponent(p)).then(d=>{"
 "if(d.error){return}let t=document.getElementById('files');t.innerHTML='';"
 "document.getElementById('crumbs').innerHTML='<b>'+p+'</b> '+(p!=='/'?'<a href=# onclick=\"list(up())\">[up]</a>':'');"
@@ -696,12 +898,15 @@ static const char INDEX_HTML[] =
 "fetch('/api/mkdir?path='+encodeURIComponent(np),{method:'POST'}).then(()=>list(cwd));}"
 "function upload(){let f=document.getElementById('fu').files[0];if(!f)return;let np=(cwd==='/'?'':cwd)+'/'+f.name;"
 "fetch('/api/upload?path='+encodeURIComponent(np),{method:'POST',body:f}).then(()=>list(cwd));}"
-"function hidType(){let t=document.getElementById('hidtext').value;fetch('/api/hid/text',{method:'POST',body:t});}"
-"function hidKey(m,k){fetch('/api/hid/key?mod='+m+'&kc='+k,{method:'POST'});}"
-"let pad=document.getElementById('pad'),lx=0,ly=0,down=false;"
-"pad.addEventListener('pointerdown',e=>{down=true;lx=e.clientX;ly=e.clientY;pad.setPointerCapture(e.pointerId);});"
-"pad.addEventListener('pointerup',e=>{down=false;});"
-"pad.addEventListener('pointermove',e=>{if(!down)return;let dx=e.clientX-lx,dy=e.clientY-ly;lx=e.clientX;ly=e.clientY;"
+"function feedback(t,bad){let e=document.getElementById('hidfeedback');e.textContent=t;e.className=bad?'bad':'mut'}"
+"async function hidType(){let t=document.getElementById('hidtext').value;if(!t)return;try{await j('/api/hid/text?enter='+(document.getElementById('hidenter').checked?'1':'0'),{method:'POST',body:t});feedback('Text queued',false)}catch(e){feedback(e.msg||e.error,true)}}"
+"async function hidKey(m,k){try{await j('/api/hid/key?mod='+m+'&kc='+k,{method:'POST'});feedback('Key queued',false)}catch(e){feedback(e.msg||e.error,true)}}"
+"document.getElementById('hidform').addEventListener('submit',e=>{e.preventDefault();hidType()});"
+"let pad=document.getElementById('pad'),lx=0,ly=0,sx=0,sy=0,started=0,down=false,moved=0;"
+"pad.addEventListener('pointerdown',e=>{down=true;lx=sx=e.clientX;ly=sy=e.clientY;started=Date.now();moved=0;pad.setPointerCapture(e.pointerId);});"
+"pad.addEventListener('pointerup',async e=>{if(!down)return;down=false;if(moved<6&&Date.now()-started<600){try{await j('/api/hid/click',{method:'POST'});feedback('Left click',false)}catch(x){feedback(x.msg||x.error,true)}}});"
+"pad.addEventListener('pointercancel',e=>{down=false});"
+"pad.addEventListener('pointermove',e=>{if(!down)return;let dx=e.clientX-lx,dy=e.clientY-ly;lx=e.clientX;ly=e.clientY;moved=Math.max(moved,Math.hypot(e.clientX-sx,e.clientY-sy));"
 "if(Math.abs(dx)+Math.abs(dy)>1)fetch('/api/hid/mouse?dx='+Math.round(dx)+'&dy='+Math.round(dy),{method:'POST'});});"
 "document.getElementById('davurl').textContent='http://'+location.host;"
 "status();setInterval(status,2000);"
@@ -723,11 +928,13 @@ static void reg(httpd_handle_t s, const char *uri, httpd_method_t m, esp_err_t (
     httpd_register_uri_handler(s, &u);
 }
 
-esp_err_t httpd_share_start(void)
+esp_err_t httpd_share_start(bool storage_share_enabled)
 {
     if (s_server) {
+        s_storage_share_enabled = storage_share_enabled;
         return ESP_OK;
     }
+    s_storage_share_enabled = storage_share_enabled;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
     config.max_uri_handlers = 24;
@@ -742,7 +949,7 @@ esp_err_t httpd_share_start(void)
     }
 
     reg(s_server, "/", HTTP_GET, index_get);
-    reg(s_server, "/api/sdstatus", HTTP_GET, api_sdstatus_get);
+    reg(s_server, "/api/status", HTTP_GET, api_status_get);
     reg(s_server, "/api/sd/takeover", HTTP_POST, api_sd_takeover_post);
     reg(s_server, "/api/sd/release", HTTP_POST, api_sd_release_post);
     reg(s_server, "/api/list", HTTP_GET, api_list_get);
@@ -753,6 +960,7 @@ esp_err_t httpd_share_start(void)
     reg(s_server, "/api/hid/text", HTTP_POST, api_hid_text_post);
     reg(s_server, "/api/hid/key", HTTP_POST, api_hid_key_post);
     reg(s_server, "/api/hid/mouse", HTTP_POST, api_hid_mouse_post);
+    reg(s_server, "/api/hid/click", HTTP_POST, api_hid_click_post);
 
     /* WebDAV: one wildcard route per supported method. */
     const httpd_method_t dav_methods[] = {
@@ -778,4 +986,9 @@ void httpd_share_stop(void)
 bool httpd_share_running(void)
 {
     return s_server != NULL;
+}
+
+bool httpd_share_storage_enabled(void)
+{
+    return s_server != NULL && s_storage_share_enabled;
 }

@@ -14,6 +14,7 @@
  * the USB host owns the card (MSC), the UI shows a "SD in use by USB storage"
  * banner with a force-unmount control and live read/write activity.
  */
-esp_err_t httpd_share_start(void);
+esp_err_t httpd_share_start(bool storage_share_enabled);
 void httpd_share_stop(void);
 bool httpd_share_running(void);
+bool httpd_share_storage_enabled(void);
