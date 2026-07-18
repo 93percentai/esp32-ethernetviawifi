@@ -7,9 +7,11 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_netif.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "net_tether.h"
 
 static const char *TAG = "wifi_mgr";
 
@@ -18,6 +20,8 @@ static wifi_mgr_status_t s_status;
 static uint8_t s_sta_mac[6];
 static EventGroupHandle_t s_wifi_events;
 static bool s_suppress_bridge;
+static bool s_nat_mode;
+static esp_netif_t *s_sta_netif;
 
 #define WIFI_SCAN_DONE_BIT   BIT0
 #define WIFI_STA_OK_BIT      BIT1
@@ -120,19 +124,46 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     }
 }
 
-esp_err_t wifi_mgr_init(bridge_config_t *cfg)
+static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *ev = data;
+        s_status.has_ip = true;
+        s_status.sta_ip = ev->ip_info.ip.addr;
+        ESP_LOGI(TAG, "STA got IP " IPSTR, IP2STR(&ev->ip_info.ip));
+        /* Route the USB host to the LAN once we have an upstream address. */
+        net_tether_enable_napt();
+    } else if (id == IP_EVENT_STA_LOST_IP) {
+        s_status.has_ip = false;
+        s_status.sta_ip = 0;
+    }
+}
+
+esp_err_t wifi_mgr_init(bridge_config_t *cfg, bool nat_mode)
 {
     s_cfg = cfg;
     memset(&s_status, 0, sizeof(s_status));
     s_status.state = WIFI_MGR_IDLE;
     s_suppress_bridge = false;
+    s_nat_mode = nat_mode;
+    s_status.nat_mode = nat_mode;
     s_wifi_events = xEventGroupCreate();
 
+    ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL));
 
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
+
+    if (nat_mode) {
+        /* Give the STA a real IP via lwIP + DHCP client so we can NAT the host. */
+        ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, on_ip_event, NULL));
+        s_sta_netif = esp_netif_create_default_wifi_sta();
+    }
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_start());

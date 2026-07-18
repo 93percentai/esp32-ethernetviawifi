@@ -145,6 +145,43 @@ Rates are exponential moving averages over ~0.5 s windows so the UI is readable 
 | Status UI | Onboard LED | ST7735 + APA102 |
 | Throughput ceiling | ~4–5 Mbit/s (USB FS) | USB FS limited similarly (~same order) |
 
+## Multi-mode gadget (SD MSC, network share, NAT tether, HID)
+
+On top of the base NCM bridge, the firmware adds runtime-toggleable modes. Each has its own LCD screen; a short BOOT tap cycles screens and a 2 s hold on a mode screen toggles it.
+
+### USB endpoint budget + LRU eviction
+
+The ESP32-S3 USB-OTG controller exposes only **5 IN endpoints including EP0** (5 TX FIFOs), i.e. **4 IN endpoints for functions**. CDC-NCM is pinned (2 IN); the optional functions share the remaining **2 IN endpoints**:
+
+- CDC-ACM console = 2, MSC = 1, HID = 1
+
+Valid optional combos: `{}`, `{ACM}`, `{MSC}`, `{HID}`, `{MSC,HID}`. Each function carries a monotonic enable sequence (`enable_seq`) in NVS. When enabling a function would exceed the budget, [usb_gadget.c](../firmware/main/usb_gadget.c) evicts the **oldest-enabled** optional function(s) first (LRU) and shows the dropped set on the toggle overlay. `usb_gadget` builds a custom composite configuration descriptor for the resolved subset; `main/tusb_override/tusb_config.h` forces `CFG_TUD_MSC=1` so the firmware can supply its own `tud_msc_*` callbacks instead of esp_tinyusb's built-in storage helper.
+
+Because TinyUSB descriptors and the network mode are effectively static, **toggling a mode persists to NVS and reboots** to re-enumerate.
+
+### Network modes: L2 bridge vs NAT tether
+
+- **L2 bridge** (default, and when only MSC is on): unchanged — no ESP IP, MAC adoption, raw `esp_wifi_internal_*`.
+- **NAT tether** (auto-selected when the network share or HID mode is on): the STA gets a real DHCP IP (`esp_netif_create_default_wifi_sta`), and a USB-side `esp_netif` (`192.168.7.1/24` + DHCP server) NAPTs the host onto the LAN ([net_tether.c](../firmware/main/net_tether.c), `CONFIG_LWIP_IPV4_NAPT`). The NCM receive callback branches: L2 → `esp_wifi_internal_tx`; NAT → `esp_netif_receive`.
+
+### SD card single-owner arbiter
+
+MSC hands the raw block device to the USB host; the on-device FAT mount (WebDAV/web share) cannot touch the card at the same time. [sdcard.c](../firmware/main/sdcard.c) enforces a single owner (`SD_OWNER_HOST` vs `SD_OWNER_ESP`) and maintains per-transfer read/write I/O counters. The custom MSC callbacks ([msc.c](../firmware/main/msc.c)) go through `sdcard_read_sectors`/`sdcard_write_sectors`, so host activity is visible. The web UI ([httpd_share.c](../firmware/main/httpd_share.c)) shows an **"SD in use by USB storage"** banner, a **Force unmount** button (switches ownership to the ESP), and **live read/write activity** with a confirm prompt when a transfer is in flight.
+
+### Web share + WebDAV + HID
+
+[httpd_share.c](../firmware/main/httpd_share.c) serves a copyparty-style file manager (`/`, `/api/*`, `/dl`) and a WebDAV subset (`/dav*`: OPTIONS/PROPFIND/GET/HEAD/PUT/DELETE/MKCOL/MOVE) from the FAT SD, reachable on the STA LAN IP and the USB NAT IP. It also exposes HID endpoints (`/api/hid/text|key|mouse`) that queue reports to [hid.c](../firmware/main/hid.c), which drives the USB HID keyboard+mouse to the plugged-in host.
+
+### Button gestures
+
+- **Short tap** — next info screen.
+- **Hold 2–5 s, release on a mode screen** — toggle that mode (save + reboot).
+- **Hold ≥5 s, release, then tap within 5 s** — factory reset (clears Wi-Fi profiles and modes).
+
+### Hardware verification note
+
+Build + QEMU boot are validated in CI/cloud, but QEMU cannot exercise USB-OTG, the SD slot, or the Wi-Fi radio. Composite enumeration (each combo), NAT DHCP/NAPT, WebDAV mounting, MSC, and HID injection must be verified on a physical T-Dongle-S3.
+
 ## Security notes
 
 - Credentials are stored in NVS (not encrypted by default). Treat a lost dongle as a credential leak.
