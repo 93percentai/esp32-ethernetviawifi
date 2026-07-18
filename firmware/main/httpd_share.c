@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 #include "bridge.h"
+#include "button.h"
+#include "display.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -212,7 +214,28 @@ static esp_err_t api_status_get(httpd_req_t *req)
 
     uint32_t web_ms = web_ms_since_io();
     bool web_active = s_web_ops > 0 || web_ms < WEB_ACTIVE_WINDOW_MS;
-    char buf[1800];
+    display_snapshot_t snap;
+    display_get_snapshot(&snap);
+
+    char lines_json[640] = "[";
+    size_t lj = 1;
+    for (int i = 0; i < snap.line_count && lj + 40 < sizeof(lines_json); i++) {
+        if (i) {
+            lines_json[lj++] = ',';
+        }
+        lines_json[lj++] = '"';
+        for (const char *p = snap.lines[i]; *p && lj + 3 < sizeof(lines_json); p++) {
+            if (*p == '"' || *p == '\\') {
+                lines_json[lj++] = '\\';
+            }
+            lines_json[lj++] = *p;
+        }
+        lines_json[lj++] = '"';
+    }
+    lines_json[lj++] = ']';
+    lines_json[lj] = '\0';
+
+    char buf[2400];
     snprintf(buf, sizeof(buf),
              "{"
              "\"modes\":{\"ncm\":true,\"acm\":%s,\"msc\":%s,\"hid\":%s,"
@@ -231,7 +254,10 @@ static esp_err_t api_status_get(httpd_req_t *req)
              "\"web_io\":{\"active\":%s,\"operations\":%lu,"
              "\"read_bytes\":%llu,\"write_bytes\":%llu,\"ms_since_io\":%u}},"
              "\"hid\":{\"host_ready\":%s,\"last_activity_ms\":%u,"
-             "\"queued\":%lu,\"sent_reports\":%lu,\"dropped\":%lu,\"queue_depth\":%lu}"
+             "\"queued\":%lu,\"sent_reports\":%lu,\"dropped\":%lu,\"queue_depth\":%lu},"
+             "\"display\":{\"screen\":%d,\"title\":\"%.19s\",\"lines\":%s,"
+             "\"overlay\":\"%.31s\",\"hold_hint\":\"%.23s\","
+             "\"hold_active\":%s,\"hold_pct\":%d}"
              "}",
              usb_gadget_func_active(USB_FUNC_ACM) ? "true" : "false",
              usb_gadget_func_active(USB_FUNC_MSC) ? "true" : "false",
@@ -268,24 +294,34 @@ static esp_err_t api_status_get(httpd_req_t *req)
              (unsigned long)hid_stats.queued_events,
              (unsigned long)hid_stats.sent_reports,
              (unsigned long)hid_stats.dropped_events,
-             (unsigned long)hid_stats.queue_depth);
+             (unsigned long)hid_stats.queue_depth,
+             snap.screen, snap.title, lines_json,
+             snap.overlay, snap.hold_hint,
+             snap.hold_active ? "true" : "false", snap.hold_pct);
     return send_json(req, "200 OK", buf);
 }
 
 /* Force the on-device share to take the card from the USB host. */
 static esp_err_t api_sd_takeover_post(httpd_req_t *req)
 {
-    if (!s_storage_share_enabled) {
-        return send_json(req, "409 Conflict", "{\"error\":\"share_disabled\"}");
-    }
     if (!sdcard_present()) {
-        return send_json(req, "409 Conflict", "{\"error\":\"no_card\"}");
+        return send_json(req, "409 Conflict",
+                         "{\"error\":\"no_card\",\"msg\":\"No SD card detected\"}");
+    }
+    char force[4] = "0";
+    get_query(req, "force", force, sizeof(force));
+    sd_io_stats_t io;
+    sdcard_get_io_stats(&io);
+    if (io.active && force[0] != '1') {
+        return send_json(req, "409 Conflict",
+                         "{\"error\":\"usb_busy\",\"msg\":\"USB transfer is active — wait until quiet, or pass force=1\"}");
     }
     esp_err_t err = sdcard_take_esp();
     if (err != ESP_OK) {
-        return send_json(req, "500 Internal Server Error", "{\"error\":\"mount_failed\"}");
+        return send_json(req, "500 Internal Server Error",
+                         "{\"error\":\"mount_failed\",\"msg\":\"Could not mount SD for web UI (unformatted/exFAT?)\"}");
     }
-    return send_json(req, "200 OK", "{\"ok\":true,\"owner\":\"esp\"}");
+    return send_json(req, "200 OK", "{\"ok\":true,\"owner\":\"esp\",\"msg\":\"SD ready for web UI\"}");
 }
 
 /* Release the card back to the USB host. */
@@ -293,14 +329,37 @@ static esp_err_t api_sd_release_post(httpd_req_t *req)
 {
     if (!usb_gadget_func_active(USB_FUNC_MSC)) {
         return send_json(req, "409 Conflict",
-                         "{\"error\":\"msc_disabled\",\"msg\":\"USB storage mode is not enabled\"}");
+                         "{\"error\":\"msc_disabled\",\"msg\":\"USB storage mode is off — open the SD screen and Hold 2s to enable it\"}");
     }
-    if (s_web_ops > 0) {
+    if (!sdcard_present()) {
         return send_json(req, "409 Conflict",
-                         "{\"error\":\"web_busy\",\"msg\":\"A web file operation is active\"}");
+                         "{\"error\":\"no_card\",\"msg\":\"No SD card detected\"}");
+    }
+    char force[4] = "0";
+    get_query(req, "force", force, sizeof(force));
+    if (s_web_ops > 0 && force[0] != '1') {
+        return send_json(req, "409 Conflict",
+                         "{\"error\":\"web_busy\",\"msg\":\"A web file operation is active — wait or pass force=1\"}");
     }
     sdcard_release_to_host();
-    return send_json(req, "200 OK", "{\"ok\":true,\"owner\":\"host\"}");
+    return send_json(req, "200 OK", "{\"ok\":true,\"owner\":\"host\",\"msg\":\"SD assigned to USB storage\"}");
+}
+
+static esp_err_t api_button_post(httpd_req_t *req)
+{
+    char action[16] = "tap";
+    get_query(req, "action", action, sizeof(action));
+    if (strcmp(action, "hold") == 0 || strcmp(action, "toggle") == 0) {
+        esp_err_t err = button_remote_hold_toggle();
+        if (err != ESP_OK) {
+            return send_json(req, "409 Conflict",
+                             "{\"error\":\"not_mode_screen\",\"msg\":\"Switch to the SD, Share, or HID screen first, then Hold 2s\"}");
+        }
+        return send_json(req, "200 OK",
+                         "{\"ok\":true,\"msg\":\"Hold toggle queued — device will reboot to apply\"}");
+    }
+    button_remote_tap();
+    return send_json(req, "200 OK", "{\"ok\":true,\"msg\":\"Button tap queued\"}");
 }
 
 /* ------------------------------------------------------------------ */
@@ -867,6 +926,11 @@ static const char INDEX_HTML[] =
 "#pad{width:100%;height:140px;background:#0d1117;border:1px dashed #30363d;border-radius:8px;touch-action:none;display:grid;place-items:center;color:#8b949e;user-select:none}"
 "#xferbar{display:none;height:8px;background:#0d1117;border:1px solid #30363d;border-radius:4px;margin-top:8px;overflow:hidden}"
 "#xferfill{height:100%;width:0;background:#238636;transition:width .1s linear}"
+".pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;margin-right:6px}"
+".pill.ok{background:#13351f;color:#3fb950}.pill.bad{background:#3d1418;color:#f85149}.pill.idle{background:#21262d;color:#8b949e}"
+"#lcd{background:#0a1628;color:#9fefef;font:14px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"
+"border:2px solid #1f6feb;border-radius:6px;padding:10px;min-height:120px;white-space:pre-wrap}"
+"#lcd .ttl{color:#58a6ff;font-weight:700;margin-bottom:6px}#lcd .ov{color:#f0b429}"
 "</style></head><body>"
 "<header>T-Dongle-S3 control</header><main>"
 "<div class=grid>"
@@ -875,9 +939,19 @@ static const char INDEX_HTML[] =
 "<div class=card><b>USB modes</b><div class=kv id=modes></div></div>"
 "<div class=card><b>Traffic</b><div class=kv id=traffic></div></div>"
 "</div>"
+"<div class=grid>"
+"<div class=card><b>LCD</b><div id=lcd class=mut>Loading…</div>"
+"<div style=margin-top:8px>"
+"<button onclick=btnTap()>Press button (tap)</button> "
+"<button class=warn onclick=btnHold()>Hold 2s (toggle mode)</button>"
+"<div id=btnmsg class=mut style=margin-top:6px></div></div></div>"
+"<div class=card id=storagecard><b>SD ownership</b>"
+"<div id=sdinfo class=mut style=margin-top:4px></div>"
+"<div id=sdActivity style=margin:8px 0></div>"
+"<div id=storageControls></div>"
+"<div id=sdmsg class=mut style=margin-top:6px></div></div>"
+"</div>"
 "<div id=sdbanner></div>"
-"<div class=card id=storagecard><b>Storage</b> <span id=sdinfo class=mut></span><div id=io class=mut></div>"
-"<div id=storageControls style=margin-top:8px></div></div>"
 "<div class=card id=filecard>"
 "<div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap\">"
 "<div id=crumbs></div><button id=refreshbtn onclick=refreshFiles()>Refresh</button></div>"
@@ -908,29 +982,70 @@ static const char INDEX_HTML[] =
 "function setProgress(pct,bad){let bar=document.getElementById('xferbar'),fill=document.getElementById('xferfill');"
 "if(pct==null){bar.style.display='none';fill.style.width='0';return}"
 "bar.style.display='block';fill.style.width=Math.max(0,Math.min(100,pct))+'%';fill.style.background=bad?'#f85149':'#238636'}"
+"function setSdMsg(t,bad){let e=document.getElementById('sdmsg');e.textContent=t||'';e.className=bad?'bad':'mut'}"
+"function setBtnMsg(t,bad){let e=document.getElementById('btnmsg');e.textContent=t||'';e.className=bad?'bad':'mut'}"
+"function renderLcd(d){if(!d)return;let h='<div class=ttl>'+d.title+(d.overlay?' · <span class=ov>'+d.overlay+'</span>':'')+'</div>';"
+"(d.lines||[]).forEach(l=>h+=l+'\\n');"
+"if(d.hold_active)h+='\\n['+ (d.hold_hint||'holding')+' '+d.hold_pct+'%]';"
+"document.getElementById('lcd').innerHTML=h}"
+"function renderSd(s){let present=s.sd.present,owner=s.sd.owner,usbAct=s.sd.usb_io.active,webAct=s.sd.web_io.active;"
+"document.getElementById('storagecard').style.display=present?'block':'none';"
+"if(!present){document.getElementById('sdinfo').textContent='No SD card';document.getElementById('sdActivity').innerHTML='';document.getElementById('storageControls').innerHTML='';return}"
+"document.getElementById('sdinfo').textContent=s.sd.type+' · '+s.sd.capacity_mb+' MB raw'+(s.sd.partition_mb?' · FAT ~'+s.sd.partition_mb+' MB':'')+' · owner='+owner;"
+"let quiet=!usbAct&&!webAct;"
+"document.getElementById('sdActivity').innerHTML="
+"'<span class=\"pill '+(usbAct?'bad':'ok')+'\">USB '+(usbAct?'ACTIVE':'quiet')+'</span>'+"
+"'<span class=\"pill '+(webAct?'bad':'ok')+'\">Web '+(webAct?'ACTIVE':'quiet')+'</span>'+"
+"'<span class=\"pill '+(quiet?'ok':'idle')+'\">'+(quiet?'Safe to switch':'Wait until quiet')+'</span><div class=mut style=margin-top:6px>'+"
+"'USB R/W '+fmt(s.sd.usb_io.read_bytes)+'/'+fmt(s.sd.usb_io.write_bytes)+"
+"' · Web R/W '+fmt(s.sd.web_io.read_bytes)+'/'+fmt(s.sd.web_io.write_bytes)+'</div>';"
+"let c=document.getElementById('storageControls'),html='';"
+"if(owner!=='esp'){"
+"html+='<div class=mut style=margin-bottom:6px>SD is with the USB host right now.</div>';"
+"if(usbAct){html+='<button disabled>Take for web UI (wait for quiet)</button> ';"
+"html+='<button class=d onclick=takeover(true)>Force take anyway</button>';}"
+"else{html+='<button onclick=takeover(false)>Take for web UI</button>';}"
+"}else{"
+"html+='<div class=mut style=margin-bottom:6px>SD is with the web UI.</div>';"
+"if(s.modes.msc){"
+"if(webAct){html+='<button disabled>Give to USB (wait for quiet)</button> ';"
+"html+='<button class=d onclick=releaseToUsb(true)>Force give to USB</button>';}"
+"else{html+='<button class=warn onclick=releaseToUsb(false)>Give SD to USB</button>';}"
+"}else{html+='<span class=mut>USB storage mode is OFF. Open the <b>SD CARD</b> LCD screen, then use Hold 2s to enable it.</span> ';"
+"html+='<button onclick=gotoSdScreen()>Go to SD screen</button>';}"
+"}"
+"c.innerHTML=html;"
+"let b=document.getElementById('sdbanner');b.className='';b.innerHTML='';"
+"if(s.sd.partition_mb&&s.sd.partition_mb+64<s.sd.capacity_mb){b.className='card busy';"
+"b.innerHTML='<b>FAT partition is only '+s.sd.partition_mb+' MB</b> of '+s.sd.capacity_mb+' MB raw. Reformat as one FAT32 volume on a PC to use the full card.';}}"
 "async function status(){try{let s=await j('/api/status');current=s;"
 "kv('device',[['Wi-Fi',s.wifi.state],['SSID',s.wifi.ssid||'—'],['SD',s.sd.present?s.sd.type+' '+s.sd.capacity_mb+' MB':'not detected'],['SD owner',s.sd.owner]]);"
 "kv('network',[['Mode',s.modes.network.toUpperCase()],['STA IP',s.wifi.sta_ip||'—'],['USB IP',s.wifi.usb_ip||'—'],['RSSI',s.wifi.rssi+' dBm']]);"
 "kv('modes',[['NCM','ON'],['ACM',s.modes.acm?'ON':'OFF'],['USB storage',s.modes.msc?'ON':'OFF'],['HID',s.modes.hid?'ON':'OFF'],['WebDAV/share',s.modes.share?'ON':'OFF']]);"
 "kv('traffic',[['Download',fmt(s.bridge.down_bytes)+' / '+fmt(s.bridge.down_bps)+'/s'],['Upload',fmt(s.bridge.up_bytes)+' / '+fmt(s.bridge.up_bps)+'/s'],['Frames',s.bridge.frames_to_host+' / '+s.bridge.frames_to_wifi],['Drops',s.bridge.drop_tx+' / '+s.bridge.drop_rx]]);"
-"let share=s.modes.share;document.getElementById('storagecard').style.display=share?'block':'none';"
-"document.getElementById('filecard').style.display=share&&s.sd.owner==='esp'?'block':'none';"
-"document.getElementById('davline').style.display=share?'block':'none';"
+"renderLcd(s.display);renderSd(s);"
+"document.getElementById('filecard').style.display=s.modes.share&&s.sd.owner==='esp'?'block':'none';"
+"document.getElementById('davline').style.display=s.modes.share?'block':'none';"
 "document.getElementById('hidcard').style.display=s.modes.hid?'block':'none';"
 "document.getElementById('hidstate').textContent=s.modes.hid?(s.hid.host_ready?'USB host ready':'Waiting for USB host')+' · sent '+s.hid.sent_reports+' · dropped '+s.hid.dropped:'disabled';"
-"if(share){document.getElementById('sdinfo').textContent=s.sd.present?(s.sd.type+' '+s.sd.capacity_mb+' MB raw'+(s.sd.partition_mb?(', FAT ~'+s.sd.partition_mb+' MB'):'')+', owner='+s.sd.owner):'no card';"
-"document.getElementById('io').textContent='USB reads '+fmt(s.sd.usb_io.read_bytes)+' / writes '+fmt(s.sd.usb_io.write_bytes)+(s.sd.usb_io.active?' — ACTIVE':' — idle')+"
-"' · web writes '+fmt(s.sd.web_io.write_bytes)+' / reads '+fmt(s.sd.web_io.read_bytes)+(s.sd.web_io.active?' — ACTIVE':' — idle');"
-"let b=document.getElementById('sdbanner'),c=document.getElementById('storageControls');b.className='';b.innerHTML='';c.innerHTML='';"
-"if(s.sd.present&&s.sd.partition_mb&&s.sd.partition_mb+64<s.sd.capacity_mb){b.className='card busy';b.innerHTML='<b>SD FAT partition is only '+s.sd.partition_mb+' MB</b> of '+s.sd.capacity_mb+' MB raw. USB mass storage will show that small volume (and its files). Reformat the card on a PC as one FAT32 volume to use the full card.';}"
-"if(s.sd.present&&s.sd.owner!=='esp'){b.className='card busy';b.innerHTML=(b.innerHTML?b.innerHTML+'<br>':'')+'<b>SD is assigned to USB storage.</b> '+(s.sd.usb_io.active?'<span class=bad>USB transfer active.</span> ':'')+'<button class=warn onclick=takeover('+(s.sd.usb_io.active?'1':'0')+')>Use SD in web UI</button>';}"
-"else if(s.sd.owner==='esp'&&s.modes.msc){c.innerHTML='<button class=warn onclick=releaseToUsb('+(s.sd.web_io.active?'1':'0')+')>Give SD to USB</button>';}"
-"else if(s.sd.owner==='esp'&&!s.modes.msc){c.innerHTML='<span class=mut>Enable USB storage mode on the device before assigning the SD to USB.</span>';}"
-"if(s.sd.owner==='esp'&&(!listed||lastOwner!=='esp')){listed=true;list(cwd,true);}if(s.sd.owner!=='esp'){document.getElementById('files').innerHTML='';listed=false;setFileMsg('SD is not available to the web UI',true);}"
-"lastOwner=s.sd.owner;}"
+"if(s.sd.owner==='esp'&&s.modes.share&&(!listed||lastOwner!=='esp')){listed=true;list(cwd,true);}"
+"if(s.sd.owner!=='esp'){document.getElementById('files').innerHTML='';listed=false;}"
+"lastOwner=s.sd.owner;"
 "}catch(e){console.error(e)}}"
-"async function takeover(active){if(active&&!confirm('USB read/write activity is in progress. Interrupting it may corrupt data. Continue?'))return;try{setFileMsg('Taking SD for web UI…',false);await j('/api/sd/takeover',{method:'POST'});listed=false;await status();setFileMsg('SD ready for web UI',false)}catch(e){setFileMsg(errMsg(e),true)}}"
-"async function releaseToUsb(active){if(active&&!confirm('A web file operation was recently active. Give the SD to USB now?'))return;try{setFileMsg('Giving SD to USB…',false);await j('/api/sd/release',{method:'POST'});document.getElementById('files').innerHTML='';listed=false;await status();setFileMsg('SD assigned to USB storage',false)}catch(e){setFileMsg(errMsg(e),true)}}"
+"async function takeover(force){if(force&&!confirm('USB activity may still be in progress. Force-take can corrupt data. Continue?'))return;"
+"try{setSdMsg(force?'Force-taking SD…':'Taking SD for web UI…',false);"
+"await j('/api/sd/takeover?force='+(force?'1':'0'),{method:'POST'});listed=false;await status();setSdMsg('SD ready for web UI',false)}"
+"catch(e){setSdMsg(errMsg(e),true)}}"
+"async function releaseToUsb(force){if(force&&!confirm('Web file activity may still be in progress. Give SD to USB anyway?'))return;"
+"try{setSdMsg(force?'Force-giving SD to USB…':'Giving SD to USB…',false);"
+"await j('/api/sd/release?force='+(force?'1':'0'),{method:'POST'});document.getElementById('files').innerHTML='';listed=false;await status();setSdMsg('SD assigned to USB storage',false)}"
+"catch(e){setSdMsg(errMsg(e),true)}}"
+"async function btnTap(){try{await j('/api/button?action=tap',{method:'POST'});setBtnMsg('Tap sent',false);setTimeout(status,200)}catch(e){setBtnMsg(errMsg(e),true)}}"
+"async function btnHold(){if(!confirm('Hold 2s toggles the mode on the current LCD screen and reboots the device. Continue?'))return;"
+"try{await j('/api/button?action=hold',{method:'POST'});setBtnMsg('Hold toggle queued — device will reboot',false)}catch(e){setBtnMsg(errMsg(e),true)}}"
+"async function gotoSdScreen(){for(let i=0;i<5;i++){await j('/api/button?action=tap',{method:'POST'});await new Promise(r=>setTimeout(r,250));"
+"let s=await j('/api/status');renderLcd(s.display);if(s.display&&s.display.title==='SD CARD'){setBtnMsg('On SD CARD screen — use Hold 2s to enable USB storage',false);return}}"
+"setBtnMsg('Could not reach SD CARD screen',true)}"
 "function up(){let x=cwd.replace(/\\/[^/]*$/,'');return x||'/'}"
 "function refreshFiles(){return list(cwd,true)}"
 "async function list(p,showMsg){if(fileBusy&&showMsg)return;cwd=p;"
@@ -1029,6 +1144,7 @@ esp_err_t httpd_share_start(bool storage_share_enabled)
     reg(s_server, "/api/status", HTTP_GET, api_status_get);
     reg(s_server, "/api/sd/takeover", HTTP_POST, api_sd_takeover_post);
     reg(s_server, "/api/sd/release", HTTP_POST, api_sd_release_post);
+    reg(s_server, "/api/button", HTTP_POST, api_button_post);
     reg(s_server, "/api/list", HTTP_GET, api_list_get);
     reg(s_server, "/dl", HTTP_GET, api_download_get);
     reg(s_server, "/api/upload", HTTP_POST, api_upload_post);

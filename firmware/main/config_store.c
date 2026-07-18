@@ -147,7 +147,11 @@ void config_share_set(bridge_config_t *cfg, bool enable)
 
 bool config_nat_wanted(const bridge_config_t *cfg)
 {
-    return config_share_enabled(cfg) || config_usb_func_enabled(cfg, USB_FUNC_HID);
+    /* Any hosting feature that needs an ESP-side IP (web UI / WebDAV / HID
+     * control / SD ownership controls) switches USB networking to NAT tether. */
+    return config_share_enabled(cfg) ||
+           config_usb_func_enabled(cfg, USB_FUNC_HID) ||
+           config_usb_func_enabled(cfg, USB_FUNC_MSC);
 }
 
 void config_clear_modes(bridge_config_t *cfg)

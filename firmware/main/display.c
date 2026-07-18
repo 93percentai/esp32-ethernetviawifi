@@ -1,5 +1,6 @@
 #include "display.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -461,6 +462,168 @@ void display_set_hold_hint(const char *hint)
     s_hold_hint[sizeof(s_hold_hint) - 1] = '\0';
 }
 
+static void snap_add(display_snapshot_t *out, const char *fmt, ...)
+{
+    if (!out || out->line_count >= DISPLAY_SNAP_LINES) {
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(out->lines[out->line_count], DISPLAY_SNAP_WIDTH, fmt, ap);
+    va_end(ap);
+    out->line_count++;
+}
+
+void display_get_snapshot(display_snapshot_t *out)
+{
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->screen = (int)s_screen;
+    out->hold_active = s_hold_active;
+    out->hold_pct = s_hold_pct;
+    strncpy(out->hold_hint, s_hold_hint, sizeof(out->hold_hint) - 1);
+
+    if (s_overlay == DISPLAY_OVERLAY_RESET_DONE) {
+        strncpy(out->title, "T-DONGLE", sizeof(out->title) - 1);
+        strncpy(out->overlay, "reset done", sizeof(out->overlay) - 1);
+        snap_add(out, "SETTINGS CLEARED");
+        return;
+    }
+    if (s_overlay == DISPLAY_OVERLAY_MODE_APPLIED) {
+        strncpy(out->title, "T-DONGLE", sizeof(out->title) - 1);
+        strncpy(out->overlay, "mode applied", sizeof(out->overlay) - 1);
+        snap_add(out, "%s", s_msg1);
+        snap_add(out, "%s", s_msg2);
+        snap_add(out, "rebooting...");
+        return;
+    }
+    if (s_overlay == DISPLAY_OVERLAY_RESET_CONFIRM) {
+        strncpy(out->title, "T-DONGLE", sizeof(out->title) - 1);
+        strncpy(out->overlay, "reset confirm", sizeof(out->overlay) - 1);
+        snap_add(out, "RESET ALL?");
+        snap_add(out, "Press again in %ds", s_overlay_seconds);
+        return;
+    }
+
+    provisioning_lcd_status_t prov;
+    provisioning_get_lcd_status(&prov);
+    if (prov.active && (s_screen == SCREEN_OVERVIEW || s_screen == SCREEN_NETWORK)) {
+        strncpy(out->title, "SETUP", sizeof(out->title) - 1);
+        snap_add(out, "LINK %s",
+                 prov.phase == PROV_PHASE_SCANNING ? "SCANNING" :
+                 prov.phase == PROV_PHASE_TESTING ? "TESTING" :
+                 prov.phase == PROV_PHASE_SUCCESS ? "SAVED" : "SETUP AP");
+        snap_add(out, "AP %s", PROV_SOFTAP_SSID);
+        snap_add(out, "URL %d.%d.%d.%d",
+                 PROV_SOFTAP_IP_A, PROV_SOFTAP_IP_B, PROV_SOFTAP_IP_C, PROV_SOFTAP_IP_D);
+        snap_add(out, "NET %d found", prov.scan_count);
+        return;
+    }
+
+    strncpy(out->title, screen_title(s_screen), sizeof(out->title) - 1);
+    char line[32];
+    switch (s_screen) {
+    case SCREEN_OVERVIEW: {
+        wifi_mgr_status_t st;
+        bridge_stats_t stats;
+        wifi_mgr_get_status(&st);
+        bridge_get_stats(&stats);
+        snap_add(out, "LINK %s", link_label(st.state));
+        snap_add(out, "SSID %.14s", st.ssid[0] ? st.ssid : "(unset)");
+        snap_add(out, "ACM %s", usb_gadget_func_active(USB_FUNC_ACM) ? "ON" : "OFF");
+        char bytes[12], rate[12];
+        bridge_format_bytes(stats.bytes_to_host, bytes, sizeof(bytes));
+        bridge_format_rate(stats.rate_to_host_bps, rate, sizeof(rate));
+        snap_add(out, "DN %s %s", bytes, rate);
+        bridge_format_bytes(stats.bytes_to_wifi, bytes, sizeof(bytes));
+        bridge_format_rate(stats.rate_to_wifi_bps, rate, sizeof(rate));
+        snap_add(out, "UP %s %s", bytes, rate);
+        break;
+    }
+    case SCREEN_NETWORK: {
+        wifi_mgr_status_t st;
+        wifi_mgr_get_status(&st);
+        snap_add(out, "MODE %s", st.nat_mode ? "NAT TETHER" : "L2 BRIDGE");
+        if (st.nat_mode) {
+            if (st.has_ip) {
+                fmt_ip(st.sta_ip, line, sizeof(line));
+            } else {
+                snprintf(line, sizeof(line), "no IP");
+            }
+            snap_add(out, "STA %s", line);
+            esp_netif_ip_info_t usb;
+            net_tether_get_usb_ip(&usb);
+            fmt_ip(usb.ip.addr, line, sizeof(line));
+            snap_add(out, "USB %s", line);
+            snap_add(out, "NAPT on");
+        } else {
+            snap_add(out, "Host holds the IP");
+            snap_add(out, "ESP has no IP");
+        }
+        break;
+    }
+    case SCREEN_SD: {
+        if (!sdcard_present()) {
+            snap_add(out, "No SD card");
+            snap_add(out, "%.18s", sdcard_last_error());
+        } else {
+            snap_add(out, "%s %lluMB", sdcard_type_str(),
+                     (unsigned long long)(sdcard_capacity_bytes() / (1024ULL * 1024ULL)));
+            snap_add(out, "USB MSC %s",
+                     usb_gadget_func_active(USB_FUNC_MSC) ? "ON" : "OFF");
+            const char *own = "idle";
+            if (sdcard_owner() == SD_OWNER_HOST) own = "USB HOST";
+            else if (sdcard_owner() == SD_OWNER_ESP) own = "WEB/DAV";
+            snap_add(out, "OWNER %s", own);
+            sd_io_stats_t io;
+            sdcard_get_io_stats(&io);
+            snap_add(out, "IO %s", io.active ? "ACTIVE" : "idle");
+        }
+        snap_add(out, "hold 2s: toggle");
+        break;
+    }
+    case SCREEN_SHARE: {
+        wifi_mgr_status_t st;
+        wifi_mgr_get_status(&st);
+        bool on = httpd_share_storage_enabled();
+        snap_add(out, "WEB+DAV %s", on ? "ON" : "OFF");
+        if (on && st.has_ip) {
+            fmt_ip(st.sta_ip, line, sizeof(line));
+            snap_add(out, "http://%s", line);
+        } else if (on) {
+            snap_add(out, "waiting for IP");
+        } else {
+            snap_add(out, "Enable to serve SD");
+        }
+        if (sdcard_owner() == SD_OWNER_HOST) {
+            snap_add(out, "SD busy (USB)");
+        }
+        snap_add(out, "hold 2s: toggle");
+        break;
+    }
+    case SCREEN_HID: {
+        bool on = usb_gadget_func_active(USB_FUNC_HID);
+        snap_add(out, "HID KBD+MOUSE");
+        snap_add(out, "STATE %s", on ? "ON" : "OFF");
+        if (on) {
+            snap_add(out, "HOST %s", hid_host_ready() ? "READY" : "waiting");
+            uint32_t ms = hid_ms_since_activity();
+            if (ms == UINT32_MAX) {
+                snap_add(out, "LAST idle");
+            } else {
+                snap_add(out, "LAST %lus ago", (unsigned long)(ms / 1000));
+            }
+        }
+        snap_add(out, "hold 2s: toggle");
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 static void display_task(void *arg)
 {
     (void)arg;
@@ -535,5 +698,15 @@ void display_next_screen(void) {}
 display_screen_t display_current_screen(void) { return SCREEN_OVERVIEW; }
 void display_set_hold(bool active, int pct, bool reset_zone) { (void)active; (void)pct; (void)reset_zone; }
 void display_set_hold_hint(const char *hint) { (void)hint; }
+void display_get_snapshot(display_snapshot_t *out)
+{
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    strncpy(out->title, "LCD off", sizeof(out->title) - 1);
+    strncpy(out->lines[0], "(display disabled)", DISPLAY_SNAP_WIDTH - 1);
+    out->line_count = 1;
+}
 
 #endif

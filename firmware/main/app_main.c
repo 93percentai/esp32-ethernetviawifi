@@ -103,8 +103,9 @@ void app_main(void)
 
     ESP_ERROR_CHECK(provisioning_apply_or_start(&cfg));
 
-    /* Web file share / HID control server (needs the NAT tether IP path). */
-    if ((share || hid) && !provisioning_is_active()) {
+    /* Web control server for file share, HID, SD ownership, and remote button.
+     * Needs the NAT tether IP path when share/HID/MSC hosting is active. */
+    if ((share || hid || msc) && !provisioning_is_active()) {
         httpd_share_start(share);
     }
 

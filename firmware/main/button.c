@@ -27,10 +27,25 @@ static bridge_config_t *s_cfg;
 static bool s_reset_armed;
 static bool s_action_fired;   /* an action already fired during the current hold */
 static int64_t s_reset_deadline_ms;
+static volatile int s_remote_cmd; /* 0=none, 1=tap, 2=hold-toggle */
 
 static bool is_mode_screen(display_screen_t s)
 {
     return s == SCREEN_SD || s == SCREEN_SHARE || s == SCREEN_HID;
+}
+
+void button_remote_tap(void)
+{
+    s_remote_cmd = 1;
+}
+
+esp_err_t button_remote_hold_toggle(void)
+{
+    if (!is_mode_screen(display_current_screen())) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_remote_cmd = 2;
+    return ESP_OK;
 }
 
 /* Live hint shown while holding, so the user knows exactly when to release. */
@@ -156,6 +171,26 @@ static void button_task(void *arg)
         }
 
         int64_t t = now_ms();
+
+        /* Remote web-UI button injection (processed when not mid physical hold). */
+        int remote = s_remote_cmd;
+        if (remote && !stable) {
+            s_remote_cmd = 0;
+            if (remote == 1) {
+                if (s_reset_armed) {
+                    s_reset_armed = false;
+                    do_factory_reset();
+                } else {
+                    display_next_screen();
+                    ESP_LOGI(TAG, "Remote tap → next screen");
+                }
+            } else if (remote == 2) {
+                if (is_mode_screen(display_current_screen()) && !s_reset_armed) {
+                    ESP_LOGI(TAG, "Remote hold → toggle mode");
+                    toggle_current_mode();
+                }
+            }
+        }
 
         /* Reset-confirm window bookkeeping. */
         if (s_reset_armed && t >= s_reset_deadline_ms) {

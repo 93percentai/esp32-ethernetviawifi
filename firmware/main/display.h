@@ -41,3 +41,19 @@ void display_set_hold(bool active, int pct, bool reset_zone);
 
 /* Short hint shown above the hold bar (e.g. "release: MSC ON"). "" clears it. */
 void display_set_hold_hint(const char *hint);
+
+/* Text mirror of what the LCD is showing (for the web UI). */
+#define DISPLAY_SNAP_LINES 8
+#define DISPLAY_SNAP_WIDTH 28
+typedef struct {
+    int screen;                         /* display_screen_t */
+    char title[20];
+    char lines[DISPLAY_SNAP_LINES][DISPLAY_SNAP_WIDTH];
+    int line_count;
+    char overlay[32];                   /* empty if none */
+    char hold_hint[24];                 /* empty if none */
+    bool hold_active;
+    int hold_pct;
+} display_snapshot_t;
+
+void display_get_snapshot(display_snapshot_t *out);
