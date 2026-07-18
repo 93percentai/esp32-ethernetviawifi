@@ -72,9 +72,15 @@ Hard-wired to the USB-A plug. No external USB PHY.
 |--------|------|-------|
 | BOOT | 0 | Active-low, internal pull-up |
 
-Firmware use (after boot): press once to show a **RESET WIFI?** confirm screen; press again within **5 seconds** to wipe saved Wi‑Fi profiles from NVS and re-enter SoftAP setup. If the second press does not arrive in time, the status HUD returns to normal.
+Firmware use (after boot):
 
-### TF card (unused here; documented for completeness)
+- **Short tap** — cycle the info screens (overview / network / SD / share / HID).
+- **Hold 2–5 s and release on a mode screen** — enable/disable that mode (persisted to NVS; the device reboots to re-enumerate USB / switch network mode).
+- **Hold ≥5 s, release, then tap again within 5 s** — factory reset (clears saved Wi‑Fi profiles **and** runtime modes, then re-enters SoftAP setup).
+
+### TF card (microSD, SDMMC)
+
+Used by the SD mass-storage and network-share modes. Defaults to 1-line SDMMC (`CONFIG_BRIDGE_SD_BUS_WIDTH`, 1 or 4).
 
 | Signal | GPIO |
 |--------|------|
