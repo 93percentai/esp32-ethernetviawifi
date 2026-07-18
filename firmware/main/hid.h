@@ -23,8 +23,8 @@ typedef struct {
     uint32_t queue_depth;
 } hid_stats_t;
 
-/* True when the HID function is active in the USB descriptor and the host is
- * ready to receive reports. */
+/* True when the HID function is active and a USB host has mounted the device.
+ * Does not mean the HID IN endpoint buffer is free right now. */
 bool hid_host_ready(void);
 
 /* Milliseconds since the last emitted HID report (UINT32_MAX if never). */

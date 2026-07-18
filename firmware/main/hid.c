@@ -45,7 +45,11 @@ static const uint8_t s_ascii2kc[128][2] = { HID_ASCII_TO_KEYCODE };
 
 bool hid_host_ready(void)
 {
-    return usb_gadget_func_active(USB_FUNC_HID) && tud_mounted() && tud_hid_ready();
+    /* Host readiness for the UI/API means the HID function is in the
+     * descriptor and a USB host has enumerated us. Do NOT require
+     * tud_hid_ready() here — that only means the IN endpoint buffer is free
+     * right now, so using it as a gate rejects nearly every HTTP request. */
+    return usb_gadget_func_active(USB_FUNC_HID) && tud_mounted();
 }
 
 void hid_get_stats(hid_stats_t *out)
@@ -84,13 +88,24 @@ static bool wait_ready(int timeout_ms)
     return true;
 }
 
+static void note_send_fail(void)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    s_stats.dropped_events++;
+    portEXIT_CRITICAL(&s_stats_lock);
+}
+
 static void send_key(uint8_t modifier, uint8_t keycode)
 {
-    if (!wait_ready(200)) {
+    if (!wait_ready(500)) {
+        note_send_fail();
         return;
     }
     uint8_t keys[6] = { keycode, 0, 0, 0, 0, 0 };
-    tud_hid_keyboard_report(HID_REPORT_ID_KEYBOARD, modifier, keycode ? keys : NULL);
+    if (!tud_hid_keyboard_report(HID_REPORT_ID_KEYBOARD, modifier, keycode ? keys : NULL)) {
+        note_send_fail();
+        return;
+    }
     s_last_activity_us = esp_timer_get_time();
     portENTER_CRITICAL(&s_stats_lock);
     s_stats.sent_reports++;
@@ -99,10 +114,14 @@ static void send_key(uint8_t modifier, uint8_t keycode)
 
 static void send_mouse(uint8_t buttons, int8_t dx, int8_t dy, int8_t wheel)
 {
-    if (!wait_ready(200)) {
+    if (!wait_ready(500)) {
+        note_send_fail();
         return;
     }
-    tud_hid_mouse_report(HID_REPORT_ID_MOUSE, buttons, dx, dy, wheel, 0);
+    if (!tud_hid_mouse_report(HID_REPORT_ID_MOUSE, buttons, dx, dy, wheel, 0)) {
+        note_send_fail();
+        return;
+    }
     s_last_activity_us = esp_timer_get_time();
     portENTER_CRITICAL(&s_stats_lock);
     s_stats.sent_reports++;

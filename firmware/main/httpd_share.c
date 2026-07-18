@@ -501,17 +501,22 @@ static esp_err_t api_mkdir_post(httpd_req_t *req)
 /* HID remote control endpoints                                       */
 /* ------------------------------------------------------------------ */
 
-static esp_err_t hid_require_ready(httpd_req_t *req)
+/* Returns true when HID events may be queued. On failure, already sent JSON. */
+static bool hid_check_ready(httpd_req_t *req)
 {
     if (!usb_gadget_func_active(USB_FUNC_HID)) {
-        return send_json(req, "409 Conflict",
-                         "{\"error\":\"hid_disabled\",\"msg\":\"HID mode is disabled\"}");
+        send_json(req, "409 Conflict",
+                  "{\"error\":\"hid_disabled\",\"msg\":\"HID mode is disabled\"}");
+        return false;
     }
+    /* Only require USB mount — not tud_hid_ready(), which flickers false
+     * whenever the endpoint buffer is busy and would break mouse streaming. */
     if (!hid_host_ready()) {
-        return send_json(req, "409 Conflict",
-                         "{\"error\":\"host_not_ready\",\"msg\":\"USB HID host is not ready\"}");
+        send_json(req, "409 Conflict",
+                  "{\"error\":\"host_not_ready\",\"msg\":\"USB HID host is not ready\"}");
+        return false;
     }
-    return ESP_OK;
+    return true;
 }
 
 static esp_err_t hid_queue_response(httpd_req_t *req, esp_err_t err)
@@ -519,20 +524,29 @@ static esp_err_t hid_queue_response(httpd_req_t *req, esp_err_t err)
     if (err == ESP_OK) {
         return send_json(req, "200 OK", "{\"ok\":true}");
     }
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_json(req, "503 Service Unavailable",
+                         "{\"error\":\"hid_unavailable\",\"msg\":\"HID queue is not ready\"}");
+    }
     return send_json(req, "503 Service Unavailable",
                      "{\"error\":\"queue_full\",\"msg\":\"HID event queue is full\"}");
 }
 
 static esp_err_t api_hid_text_post(httpd_req_t *req)
 {
-    if (!usb_gadget_func_active(USB_FUNC_HID) || !hid_host_ready()) {
-        return hid_require_ready(req);
+    if (!hid_check_ready(req)) {
+        return ESP_OK;
     }
     char body[256];
     int len = req->content_len < (int)sizeof(body) - 1 ? req->content_len : (int)sizeof(body) - 1;
+    if (len <= 0) {
+        return send_json(req, "400 Bad Request",
+                         "{\"error\":\"no_body\",\"msg\":\"No text to type\"}");
+    }
     int r = httpd_req_recv(req, body, len);
     if (r <= 0) {
-        return send_json(req, "400 Bad Request", "{\"error\":\"no_body\"}");
+        return send_json(req, "400 Bad Request",
+                         "{\"error\":\"no_body\",\"msg\":\"Failed to read text body\"}");
     }
     body[r] = '\0';
     char enter[4] = "0";
@@ -542,8 +556,8 @@ static esp_err_t api_hid_text_post(httpd_req_t *req)
 
 static esp_err_t api_hid_key_post(httpd_req_t *req)
 {
-    if (!usb_gadget_func_active(USB_FUNC_HID) || !hid_host_ready()) {
-        return hid_require_ready(req);
+    if (!hid_check_ready(req)) {
+        return ESP_OK;
     }
     char mods[8] = "0", kc[8] = "0";
     get_query(req, "mod", mods, sizeof(mods));
@@ -554,8 +568,8 @@ static esp_err_t api_hid_key_post(httpd_req_t *req)
 
 static esp_err_t api_hid_mouse_post(httpd_req_t *req)
 {
-    if (!usb_gadget_func_active(USB_FUNC_HID) || !hid_host_ready()) {
-        return hid_require_ready(req);
+    if (!hid_check_ready(req)) {
+        return ESP_OK;
     }
     char dx[8] = "0", dy[8] = "0", btn[8] = "0", wh[8] = "0";
     get_query(req, "dx", dx, sizeof(dx));
@@ -568,8 +582,8 @@ static esp_err_t api_hid_mouse_post(httpd_req_t *req)
 
 static esp_err_t api_hid_click_post(httpd_req_t *req)
 {
-    if (!usb_gadget_func_active(USB_FUNC_HID) || !hid_host_ready()) {
-        return hid_require_ready(req);
+    if (!hid_check_ready(req)) {
+        return ESP_OK;
     }
     return hid_queue_response(req, hid_queue_left_click());
 }
