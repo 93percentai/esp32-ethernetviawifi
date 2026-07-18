@@ -894,7 +894,7 @@ static const char INDEX_HTML[] =
 "document.getElementById('filecard').style.display=share&&s.sd.owner==='esp'?'block':'none';"
 "document.getElementById('davline').style.display=share?'block':'none';"
 "document.getElementById('hidcard').style.display=s.modes.hid?'block':'none';"
-"document.getElementById('hidstate').textContent=s.modes.hid?(s.hid.host_ready?'USB host ready':'Waiting for USB host'):'disabled';"
+"document.getElementById('hidstate').textContent=s.modes.hid?(s.hid.host_ready?'USB host ready':'Waiting for USB host')+' · sent '+s.hid.sent_reports+' · dropped '+s.hid.dropped:'disabled';"
 "if(share){document.getElementById('sdinfo').textContent=s.sd.present?(s.sd.type+' '+s.sd.capacity_mb+' MB, owner='+s.sd.owner):'no card';"
 "document.getElementById('io').textContent='USB reads '+fmt(s.sd.usb_io.read_bytes)+' / writes '+fmt(s.sd.usb_io.write_bytes)+(s.sd.usb_io.active?' — ACTIVE':' — idle')+"
 "' · web writes '+fmt(s.sd.web_io.write_bytes)+' / reads '+fmt(s.sd.web_io.read_bytes)+(s.sd.web_io.active?' — ACTIVE':' — idle');"
