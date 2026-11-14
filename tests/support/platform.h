@@ -17,7 +17,11 @@ typedef int esp_err_t;
 #define ESP_ERR_TIMEOUT 5
 #define ESP_INTR_FLAG_LOWMED 0
 #define CONFIG_IDF_TARGET_ESP32S31 1
-#define CONFIG_KORVO_USB_CONFIGURATION 2
+#define CONFIG_KORVO_USB_CONFIGURATION 1
+#ifndef CONFIG_KORVO_USB_AUTO_CONFIGURATION
+#define CONFIG_KORVO_USB_AUTO_CONFIGURATION 1
+#endif
+#define CONFIG_KORVO_USB_TRACE_CONTROL 0
 #define pdTRUE 1
 #define pdFALSE 0
 #define pdPASS 1
@@ -44,6 +48,7 @@ static inline int xQueueReceive(QueueHandle_t q, void *item, unsigned timeout) {
     (void)timeout; if (!q->count) return pdFALSE;
     memcpy(item, q->bytes + q->head * q->size, q->size); q->head = (q->head + 1) % q->capacity; --q->count; return pdTRUE;
 }
+static inline unsigned uxQueueMessagesWaiting(QueueHandle_t q) { return q->count; }
 static inline int xQueueReset(QueueHandle_t q) { q->head = q->count = 0; return pdTRUE; }
 static inline SemaphoreHandle_t xSemaphoreCreateMutex(void) { return calloc(1, sizeof(int)); }
 static inline int xSemaphoreTake(SemaphoreHandle_t lock, unsigned timeout) { (void)lock; (void)timeout; return pdTRUE; }

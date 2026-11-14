@@ -6,6 +6,9 @@ typedef struct {
     bool learned, ready;
     uint8_t client_mac[6];
     uint32_t other_clients, invalid_frames;
+    uint32_t ethernet_dhcp, wifi_dhcp, ethernet_arp, wifi_arp;
+    uint32_t adoption_attempts, adoption_failures;
+    int last_wifi_tx_error;
 } korvo_bridge_status_t;
 
 esp_err_t korvo_bridge_start(bridge_config_t *cfg);

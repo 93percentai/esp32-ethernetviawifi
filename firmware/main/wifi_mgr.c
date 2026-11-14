@@ -81,6 +81,8 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
 
     case WIFI_EVENT_STA_DISCONNECTED: {
         wifi_event_sta_disconnected_t *ev = data;
+        s_status.last_disconnect_reason = ev->reason;
+        ++s_status.disconnects;
         if (!s_suppress_bridge) {
             bridge_set_wifi_up(false);
         }

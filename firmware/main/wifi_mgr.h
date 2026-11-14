@@ -24,6 +24,8 @@ typedef struct {
     uint8_t channel;
     uint8_t mac[6];
     uint8_t bssid[6];
+    uint16_t last_disconnect_reason;
+    uint32_t disconnects;
 } wifi_mgr_status_t;
 
 typedef struct {

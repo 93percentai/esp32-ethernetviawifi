@@ -7,40 +7,45 @@ is a RISC-V preview target, distinct from ESP32-S3. The original LilyGO USB
 network gadget remains in `firmware/`; this application is `firmware-korvo/`.
 
 ```text
-Wi-Fi router <--802.11--> S31-Korvo-1 <--USB CDC ECM--> adapter <--RJ45--> one client
+Wi-Fi router <--802.11--> S31-Korvo-1 <--USB Ethernet--> adapter <--RJ45--> one client
         DHCP/IP assigned directly to the wired client (no NAT)
 ```
 
-## Adapter requirements
+## Adapter support
 
-The host driver implements **CDC ECM**, communication interface class `02`,
-subclass `06`, protocol `00`, a CDC Union descriptor, an Ethernet descriptor,
-an interrupt-IN endpoint, and a CDC Data interface with bulk-IN/bulk-OUT.
-It follows the Union's actual interface numbers and the advertised alternate
-setting; they need not be adjacent or use alternate 1. The adapter must accept
-`SET_ETHERNET_PACKET_FILTER` with promiscuous reception: replies addressed to
-the wired client have a different MAC from the adapter's factory MAC.
+The firmware supports **CDC ECM, CDC NCM16 and RNDIS**, plus native drivers
+for **AX88772/A/B**, **AX88179/AX88178A**, **RTL8152**, **DM96xx** and
+**LAN95xx** adapter families. Standard-class discovery is independent of retail
+brand and VID:PID. Native register commands are restricted to the exact chipset
+and OEM IDs in the registry; native RTL8152 also checks its silicon revision.
 
-**A USB-to-Ethernet product name alone does not establish compatibility.**
-RNDIS, CDC NCM host mode, and vendor-specific ASIX/Realtek protocols are not
-implemented. Some adapter revisions expose ECM in another USB configuration;
-others expose only vendor interfaces. Do not assume every RTL8152/RTL8153 or
-AX88772/AX88179 adapter works. No particular adapter has been physically tested
-with this firmware, and the user's adapter model has not yet been established.
+By default the application inspects up to **16 USB configurations**, prefers
+ECM, then NCM, RNDIS and native mode, and re-enumerates in the selected
+configuration. This handles adapters whose default configuration contains only
+vendor interfaces or a driver CD image. No storage is mounted or executed. If
+initialization fails, it tries the next compatible configuration once. USB
+unplug clears the failure history so reconnection can retry. Re-enumeration
+resets the root port and all downstream USB devices.
 
-Use your [USBView firmware](https://github.com/93percentai/esp32-usbview) to inspect
-the VID:PID, configuration values and interfaces. In `idf.py --preview menuconfig`
-under **Korvo Wi-Fi Ethernet bridge**, set **USB bConfigurationValue to select**
-to the configuration advertising ECM (default `1`; sometimes `2`). The selection
-applies at enumeration, before interfaces are claimed. Values must match the
-device's descriptors. An unavailable configuration fails host enumeration;
-serial logs show that failure. Vendor-only adapters need a separate chipset driver.
+See [the adapter matrix and troubleshooting guide](USB_ADAPTERS.md) for native
+IDs, protocol limits, firmware options and the difference between software
+coverage and physical validation. **No adapter/board combination has been
+physically qualified by these Cloud checks.** A name such as “RTL8153” or
+“AX88179” is not a guarantee for every product revision.
 
-The port has a hardware 500 mA current limit. Use an adequate board supply;
-adapters needing more power require a separately powered high-speed hub.
-The pinned host stack supports hubs but lacks full-/low-speed transaction
-translation behind a high-speed hub. Prefer connecting the adapter directly.
-USB 3 adapters must enumerate in a supported USB 2 mode.
+Your [USBView firmware](https://github.com/93percentai/esp32-usbview) remains
+useful for inspecting VID:PID, configurations, interfaces and negotiated speed.
+For manual selection, disable **Discover Ethernet configurations automatically**
+in `idf.py --preview menuconfig` → **Korvo Wi-Fi Ethernet bridge**, then set
+**USB bConfigurationValue to select**. The host library requires configuration
+value = descriptor index + 1; unusual nonconsecutive values are reported.
+
+The USB-A port has a hardware 500 mA current limit. Use an adequate board supply;
+adapters needing more power require a separately powered hub. USB 3 adapters
+must enumerate in USB 2 compatibility mode. The pinned host stack lacks
+full-/low-speed transaction translation behind a high-speed hub. Connect those
+adapters directly, or try **Force USB full-speed host mode** in menuconfig.
+The latter limits the entire root bus to 12 Mbit/s.
 
 ## Build and flash
 
@@ -98,6 +103,34 @@ setup flow. It stops after a successful test/save. There is no management IP
 on the bridged station; `192.168.1.1` is the setup AP only. The firmware creates
 no STA IP stack or DHCP client that could compete with the wired device.
 
+## Serial and touchscreen debugging
+
+The LCD has **Overview**, **Diagnostics** and **Logs** tabs. Diagnostics and Logs
+scroll vertically. Overview shows the selected driver/configuration, USB identity,
+Wi-Fi state, link and client identity, traffic and current setup instruction.
+
+Diagnostics includes endpoints and max-packet sizes, control/data interfaces and
+alternate setting, USB speed, MAC addresses, silicon revision, last control
+request and transfer status, initialization stage, queue saturation/stale drops,
+malformed USB blocks, timeouts, DHCP/ARP activity in each direction, MAC-adoption
+attempts/failures, Wi-Fi disconnect reason and free/minimum internal heap/PSRAM.
+The USB speed is negotiated bus speed; Ethernet link rate is reported separately.
+An unknown duplex/rate is not a throughput measurement.
+
+UART logs configuration/interface/endpoint discovery, protocol selection,
+re-enumeration/fallback, initialization results, cable changes, and complete
+control/transfer failure details. Status summaries print every five seconds.
+Enable **Log every USB control request to serial and screen log** in menuconfig
+for request type/code, value/index, length and result. Packet payloads and Wi-Fi
+passwords are not printed by this tracing.
+
+The Logs tab retains the latest 16 KiB of ESP application logs, including host
+stack enumeration errors that occur before a device can be opened. It shows
+retention-overwrite and fragment-truncation counters and removes ANSI colors.
+The visible tail is 4 KiB. UART output continues normally. Logs reset on reboot;
+ROM/bootloader messages and direct `printf` output remain serial-only. Capture
+UART from reset when diagnosing a startup crash.
+
 ## Forwarding and limits
 
 - This is **one-client MAC adoption**, using the same raw Wi-Fi API concept as
@@ -110,7 +143,8 @@ no STA IP stack or DHCP client that could compete with the wired device.
 - Frames use standard untagged Ethernet with MTU 1500 (14–1514 bytes without
   FCS). VLAN frames and jumbo frames are dropped. IPv4 and IPv6 frames are
   forwarded, but physical IPv6 operation has not been verified.
-- Two USB receive transfers preserve completion order and frame boundaries.
+- Two USB receive transfers preserve completion order. ECM frame boundaries and
+  NCM/RNDIS/native aggregate metadata are validated before any frame is delivered.
   Exact-max-packet-size USB writes include a terminating zero-length packet.
   Wi-Fi receive buffers are copied to a bounded 24-frame queue and released
   once; USB never retains a borrowed Wi-Fi buffer. Counters distinguish queued
@@ -120,7 +154,8 @@ no STA IP stack or DHCP client that could compete with the wired device.
   A stalled control transfer (2 s) or transmit (500 ms) resets the USB host port.
   Other USB errors stop forwarding and ask for an adapter reconnect.
 - Adapter enumeration is not Ethernet link establishment. A CDC cable
-  notification or a valid received Ethernet frame establishes the link.
+  notification, a polled native/RNDIS link result, or a valid received Ethernet
+  frame establishes the link.
   No Wi-Fi/USB throughput or latency claim is made before hardware measurements.
 
 ## Validation
@@ -132,27 +167,33 @@ cd firmware-korvo
 idf.py --preview build size
 ```
 
-Host tests use ASan/UBSan. They cover malformed/truncated CDC descriptors,
-nonadjacent interfaces and alternate settings, strict MAC strings, 30,000 random
-inputs, frame bounds, Wi-Fi form decoding/escaping, and the actual USB driver
-with mocked host APIs: setup requests, promiscuous filter, frame completion
-order, queue overflow, stale generations, unplug while URBs are pending and
-replug. Forwarding tests exercise actual bridge callbacks: one-client learning,
-MAC-adoption gating, foreign sources/destinations, reflection drops, queue
-failure and exactly-once Wi-Fi buffer release. Mocks do not simulate a USB
-controller, Wi-Fi radio, DMA/cache behavior, FreeRTOS concurrency or LCD.
+Host tests use ASan/UBSan and strict compiler warnings. They exercise:
 
-Cloud validation on 2026-11-14 passed all four host test executables, the
-S31 v6.1 build/size check with hub support enabled, and the original S3
-v6.0.2 build/size regression check. The S31 image-size report is approximately
-1.53 MB against its 6 MB application partition; this is not a runtime heap
-measurement. The SDK emits upstream private-include dependency warnings;
-the application compiles and links. No physical serial device is attached.
+- Existing provisioning form bounds and escaping, and original ECM bounds.
+- Generic ECM/NCM/RNDIS/native descriptor binding and exact native-ID matching.
+- NCM16 alignment, multiple datagrams, NDP cycles, metadata/payload overlap;
+  RNDIS message bounds; native length/CRC/padding and aggregate boundaries.
+- More than 40,000 randomized descriptor/payload inputs, with no partial
+  publication of a malformed aggregate.
+- The actual USB manager with mocked host APIs: automatic selection, fallback
+  after a rejected ECM filter, manual configuration, hotplug during pending
+  URBs, stale/full queues, exact completion order, and a timed-out EP0 request.
+- RNDIS INIT/query/filter request IDs and status, NCM negotiation and FS size
+  limits, native initialization/link models, promiscuous mode and control-error
+  propagation, plus rejecting unsupported RTL8153 native silicon.
+- Actual bridge callbacks and Wi-Fi buffer ownership, plus log-ring wrapping,
+  overwrite accounting and bounded snapshots.
+
+The expanded firmware is cross-compiled for S31 with ESP-IDF v6.1. The original
+S3 v6.0.2 build is checked for regressions from the shared Wi-Fi status changes.
+Mocks do not model the controller, DMA/cache behavior, radio, physical PHY,
+FreeRTOS scheduling, LCD or real adapter quirks. See the adapter matrix for the
+physical status. No serial hardware is attached in Cloud.
 
 Before calling a board/adapter combination working, record its VID:PID and
 configuration and perform these physical checks:
 
-- Confirm boot, LCD/touch, HS enumeration, ECM claims/filter and cable events.
+- Confirm boot, LCD/touch, USB enumeration, driver initialization/filter and cable events.
 - Provision a valid network, an invalid password and a hidden 32-byte SSID;
   verify reboot persistence and automatic setup fallback.
 - Renew the wired client's DHCP lease. Confirm the router sees the client's
@@ -170,10 +211,11 @@ Cloud builds cannot perform those physical checks.
 
 Wi-Fi profiles, provisioning and captive DNS are shared with the LilyGO build.
 Strict form helpers are reused from your MIT-licensed
-[MS2109 project](https://github.com/93percentai/esp32-MS2109). S31 board defaults,
+[MS2109 project](https://github.com/93percentai/esp32-MS2109). The log-ring helpers also come from that project. S31 board defaults,
 USB HS and display initialization were checked against that project and USBView.
 No USBView GPL database or application source is included. The BSP/USB/LVGL
-components retain their respective upstream licenses. CDC ECM parsing and
-forwarding in this application are project code under this repository's MIT
-license. ESP-IDF's `sta2eth` example is architectural reference, not a USB host
+components retain their respective upstream licenses. The RTL8152 initializer is adapted from Apache-2.0 CherryUSB; its copyright,
+license, upstream commit and port changes are retained in `main/vendor/`.
+The AX88772 reset sequence was also checked against CherryUSB. See
+[adapter research and provenance](USB_ADAPTERS.md#sources-and-provenance). ESP-IDF's `sta2eth` example is architectural reference, not a USB host
 adapter driver.

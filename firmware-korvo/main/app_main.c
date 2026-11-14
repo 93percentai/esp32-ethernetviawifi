@@ -1,4 +1,5 @@
 #include "korvo_bridge.h"
+#include "diagnostics.h"
 #include "korvo_display.h"
 #include "usb_ethernet.h"
 #include "config_store.h"
@@ -13,7 +14,8 @@
 
 void app_main(void)
 {
-    ESP_LOGI("main", "ESP32-S31-Korvo-1 Wi-Fi to USB Ethernet bridge (CDC ECM)");
+    diagnostics_init();
+    ESP_LOGI("main", "ESP32-S31-Korvo-1 USB Ethernet bridge: ECM / NCM / RNDIS / native drivers");
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -28,18 +30,12 @@ void app_main(void)
     ESP_ERROR_CHECK(usb_ethernet_start());
     /* The common portal owns only an AP netif. The bridged STA has no local IP
      * or DHCP client; DHCP comes from the directly connected Ethernet device. */
-    ESP_ERROR_CHECK(provisioning_apply_or_start(&cfg));
-    ESP_ERROR_CHECK(korvo_bridge_start(&cfg));
     err = korvo_display_start();
     if (err != ESP_OK) ESP_LOGW("main", "LCD unavailable: %s; bridge continues", esp_err_to_name(err));
+    ESP_ERROR_CHECK(provisioning_apply_or_start(&cfg));
+    ESP_ERROR_CHECK(korvo_bridge_start(&cfg));
     for (;;) {
-        usb_ethernet_status_t usb; usb_ethernet_status(&usb);
-        korvo_bridge_status_t client; korvo_bridge_status(&client);
-        bridge_stats_t stats; bridge_get_stats(&stats);
-        ESP_LOGI("main", "USB=%04x:%04x ready=%d link=%d bridge=%d; "
-            "frames down/up=%" PRIu32 "/%" PRIu32 " drops=%" PRIu32 "/%" PRIu32 " errors=%" PRIu32,
-            usb.vid, usb.pid, usb.ready, usb.link, client.ready,
-            stats.frames_to_host, stats.frames_to_wifi, stats.drop_rx, stats.drop_tx, usb.errors);
+        diagnostics_serial_status();
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }

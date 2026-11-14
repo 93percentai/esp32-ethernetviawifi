@@ -10,8 +10,9 @@ This repo contains **ESP-IDF firmware** for two boards: the LilyGO T-Dongle-S3 U
 - In the prepared workspace source `/workspace/setup/activate-idf61.sh`.
 - From `firmware-korvo/`: `idf.py --preview set-target esp32s31`, then `idf.py --preview build size`.
 - S31 is a RISC-V preview target, distinct from S3. Keep separate build directories and SDK environments.
-- `sh tests/run.sh` runs host checks for ECM descriptors, USB lifecycle, forwarding and provisioning forms with ASan/UBSan.
+- `sh tests/run.sh` runs host checks for network protocols, class/native initialization, USB lifecycle, forwarding, provisioning and log retention with ASan/UBSan.
 - The stock LCD uses the official BSP; its backlight control APIs are unsupported.
+- Native IDs, protocol limits and provenance are in [docs/USB_ADAPTERS.md](docs/USB_ADAPTERS.md). Prefer class-mode fallback over vendor initialization and do not guess register compatibility from a product name.
 - USB host is installed by this application to provide a configuration-selection callback. Do not also call `bsp_usb_host_start()`.
 - No physical hardware is attached in Cloud. Cross-compilation and mocked host checks do not establish USB, radio, LCD, DHCP or throughput operation.
 - See [docs/KORVO_S31.md](docs/KORVO_S31.md) for adapter requirements and hardware validation.

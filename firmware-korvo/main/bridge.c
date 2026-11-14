@@ -22,6 +22,16 @@ static uint64_t s_last_down, s_last_up;
 static atomic_bool s_setup_request;
 static bridge_config_t *s_cfg;
 
+static bool is_dhcp(const uint8_t *f, size_t n)
+{
+    if (n < 42 || f[12] != 8 || f[13] != 0 || (f[14] >> 4) != 4 || f[23] != 17) return false;
+    size_t ihl = (f[14] & 15) * 4;
+    if (ihl < 20 || n < 14 + ihl + 8 || (f[20] & 0x3f) || f[21]) return false;
+    const uint8_t *udp = f + 14 + ihl;
+    unsigned from = (udp[0] << 8) | udp[1], to = (udp[2] << 8) | udp[3];
+    return (from == 67 && to == 68) || (from == 68 && to == 67);
+}
+
 static void update_ready(void)
 {
     s_client.ready = s_client.learned && s_mac_matches && s_wifi_up && s_ethernet_up;
@@ -31,6 +41,8 @@ static esp_err_t wifi_receive(void *buffer, uint16_t length, void *eb)
 {
     const uint8_t *frame = buffer;
     portENTER_CRITICAL(&s_lock);
+    if (is_dhcp(frame, length)) ++s_client.wifi_dhcp;
+    if (length >= 14 && frame[12] == 8 && frame[13] == 6) ++s_client.wifi_arp;
     bool ready = s_client.ready;
     bool reflected = length >= 12 && !memcmp(frame + 6, s_client.client_mac, 6);
     bool destined = length >= 14 && ((frame[0] & 1) || !memcmp(frame, s_client.client_mac, 6));
@@ -86,6 +98,8 @@ void korvo_bridge_receive(const uint8_t *frame, size_t length)
         return;
     }
     portENTER_CRITICAL(&s_lock);
+    if (is_dhcp(frame, length)) ++s_client.ethernet_dhcp;
+    if (frame[12] == 8 && frame[13] == 6) ++s_client.ethernet_arp;
     if (!s_client.learned && s_ethernet_up && bridge_frame_can_learn(frame, length)) {
         memcpy(s_client.client_mac, frame + 6, 6);
         s_client.learned = true;
@@ -99,6 +113,7 @@ void korvo_bridge_receive(const uint8_t *frame, size_t length)
     if (!ready) return;
     esp_err_t err = esp_wifi_internal_tx(WIFI_IF_STA, (void *)frame, length);
     portENTER_CRITICAL(&s_lock);
+    s_client.last_wifi_tx_error = err;
     if (err == ESP_OK) { s_stats.bytes_to_wifi += length; ++s_stats.frames_to_wifi; }
     else ++s_stats.drop_tx;
     portEXIT_CRITICAL(&s_lock);
@@ -174,8 +189,10 @@ static void control_task(void *arg)
             ESP_LOGI("bridge", "Adopting wired client MAC %02x:%02x:%02x:%02x:%02x:%02x",
                 client.client_mac[0], client.client_mac[1], client.client_mac[2],
                 client.client_mac[3], client.client_mac[4], client.client_mac[5]);
+            portENTER_CRITICAL(&s_lock); ++s_client.adoption_attempts; portEXIT_CRITICAL(&s_lock);
             esp_err_t err = wifi_mgr_adopt_mac(client.client_mac);
             portENTER_CRITICAL(&s_lock);
+            if (err != ESP_OK) ++s_client.adoption_failures;
             if (err == ESP_OK && s_client.learned && !memcmp(s_client.client_mac, client.client_mac, 6)) {
                 s_mac_matches = true; update_ready();
             }

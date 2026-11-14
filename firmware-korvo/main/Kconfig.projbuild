@@ -8,11 +8,25 @@ menu "Korvo Wi-Fi Ethernet bridge"
     config KORVO_LCD_ENABLED
         bool "Enable stock 800x480 touch display"
         default y
+    config KORVO_USB_AUTO_CONFIGURATION
+        bool "Discover Ethernet configurations automatically"
+        default y
+        help
+            Inspect up to sixteen configurations and re-enumerate using ECM,
+            NCM, RNDIS or a supported native chipset. No storage is mounted.
+    config KORVO_USB_FORCE_FULL_SPEED
+        bool "Force USB full-speed host mode (compatibility diagnostic)"
+        default n
+        help
+            Limit the root bus to 12 Mbit/s. This can help full-speed adapters
+            behind a high-speed hub when transaction translation is unavailable.
+    config KORVO_USB_TRACE_CONTROL
+        bool "Log every USB control request to serial and screen log"
+        default n
     config KORVO_USB_CONFIGURATION
         int "USB bConfigurationValue to select"
         range 1 255
         default 1
         help
-            Select a configuration exposing CDC ECM. Some adapters expose it
-            only in configuration 2. Use USBView to inspect your adapter.
+            Used when automatic configuration discovery is disabled.
 endmenu

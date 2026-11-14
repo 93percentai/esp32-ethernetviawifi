@@ -4,15 +4,18 @@
 
 A separate **[Korvo firmware build](docs/KORVO_S31.md)** in `firmware-korvo/`
 connects one wired Ethernet device to a Wi-Fi access point using the Korvo's
-USB-A high-speed host port and a **USB CDC ECM Ethernet adapter**. It includes
+USB-A high-speed host port and a **supported USB Ethernet adapter**. It includes
 the stock 800×480 touchscreen status page and the existing Wi-Fi setup portal.
 The wired device gets its IP from your Wi-Fi router; there is no NAT.
 
 Use **ESP-IDF v6.1**, target **`esp32s31`**, with `idf.py --preview`.
-The adapter must expose CDC ECM in the selected USB configuration and accept
-promiscuous reception. RNDIS, CDC NCM host mode and vendor-only chipsets are
-not implemented. Adapter model/VID:PID and physical-board testing are still
-needed to confirm compatibility. See the guide for building, flashing and checks.
+Implemented paths: **CDC ECM, CDC NCM16, RNDIS**, and native **AX88772/A/B,
+AX88179/178A, RTL8152, DM96xx and LAN95xx** drivers. USB configurations are
+discovered automatically, with fallback when initialization fails. The LCD has
+Overview, Diagnostics and recent Logs tabs; UART includes discovery and error
+traces. See the [adapter matrix](docs/USB_ADAPTERS.md) for IDs, silicon limits
+and physical validation status. These paths are software-tested; real adapter
+compatibility still needs hardware confirmation.
 
 ## LilyGO T-Dongle-S3
 
