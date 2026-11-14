@@ -1,0 +1,18 @@
+menu "Korvo Wi-Fi Ethernet bridge"
+    config BRIDGE_WIFI_SSID
+        string "Default Wi-Fi SSID (optional)"
+        default ""
+    config BRIDGE_WIFI_PASSWORD
+        string "Default Wi-Fi password (optional)"
+        default ""
+    config KORVO_LCD_ENABLED
+        bool "Enable stock 800x480 touch display"
+        default y
+    config KORVO_USB_CONFIGURATION
+        int "USB bConfigurationValue to select"
+        range 1 255
+        default 1
+        help
+            Select a configuration exposing CDC ECM. Some adapters expose it
+            only in configuration 2. Use USBView to inspect your adapter.
+endmenu

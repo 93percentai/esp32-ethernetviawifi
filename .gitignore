@@ -3,6 +3,10 @@ firmware/build/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
+firmware-korvo/build/
+firmware-korvo/sdkconfig
+firmware-korvo/sdkconfig.old
+firmware-korvo/managed_components/
 
 # Editor / OS
 .vscode/

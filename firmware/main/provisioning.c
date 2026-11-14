@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "dns_server.h"
 #include "esp_event.h"
@@ -16,26 +17,27 @@
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "wifi_mgr.h"
+#include "form_codec.h"
 
 static const char *TAG = "provisioning";
 
 #define PROV_SCAN_MAX       24
 #define PROV_TEST_TIMEOUT_MS 20000
-#define PROV_HTML_MAX       6144
+#define PROV_HTML_MAX       16384
 
 static bridge_config_t *s_cfg;
-static bool s_active;
+static atomic_bool s_active;
 static esp_netif_t *s_ap_netif;
 static httpd_handle_t s_httpd;
 static dns_server_handle_t s_dns;
 static wifi_scan_result_t s_scan[PROV_SCAN_MAX];
-static int s_scan_count;
+static atomic_int s_scan_count;
 static char s_status_msg[96];
 static SemaphoreHandle_t s_lock;
-static bool s_testing;
+static atomic_bool s_testing;
 static bool s_netif_ready;
-static prov_phase_t s_phase;
-static int s_clients;
+static atomic_int s_phase;
+static atomic_int s_clients;
 static bool s_ap_events_registered;
 
 static void set_status_msg(const char *msg)
@@ -58,83 +60,6 @@ static void on_ap_event(void *arg, esp_event_base_t base, int32_t id, void *data
         ESP_LOGI(TAG, "Portal client leave (clients=%d)", s_clients);
     }
     (void)data;
-}
-
-static void html_escape(const char *in, char *out, size_t out_len)
-{
-    size_t o = 0;
-    for (size_t i = 0; in[i] && o + 1 < out_len; i++) {
-        char c = in[i];
-        const char *rep = NULL;
-        if (c == '&') {
-            rep = "&amp;";
-        } else if (c == '<') {
-            rep = "&lt;";
-        } else if (c == '>') {
-            rep = "&gt;";
-        } else if (c == '"') {
-            rep = "&quot;";
-        }
-        if (rep) {
-            size_t n = strlen(rep);
-            if (o + n >= out_len) {
-                break;
-            }
-            memcpy(out + o, rep, n);
-            o += n;
-        } else {
-            out[o++] = c;
-        }
-    }
-    out[o] = '\0';
-}
-
-static int url_decode(char *dst, size_t dst_len, const char *src, size_t src_len)
-{
-    size_t o = 0;
-    for (size_t i = 0; i < src_len && o + 1 < dst_len; i++) {
-        if (src[i] == '+' ) {
-            dst[o++] = ' ';
-        } else if (src[i] == '%' && i + 2 < src_len) {
-            char hex[3] = { src[i + 1], src[i + 2], 0 };
-            char *end = NULL;
-            long v = strtol(hex, &end, 16);
-            if (end && *end == '\0') {
-                dst[o++] = (char)v;
-                i += 2;
-            } else {
-                dst[o++] = src[i];
-            }
-        } else {
-            dst[o++] = src[i];
-        }
-    }
-    dst[o] = '\0';
-    return (int)o;
-}
-
-static bool form_get(const char *body, const char *key, char *out, size_t out_len)
-{
-    size_t key_len = strlen(key);
-    const char *p = body;
-    while (p && *p) {
-        const char *eq = strchr(p, '=');
-        if (!eq) {
-            break;
-        }
-        const char *amp = strchr(eq + 1, '&');
-        size_t klen = (size_t)(eq - p);
-        size_t vlen = amp ? (size_t)(amp - (eq + 1)) : strlen(eq + 1);
-        if (klen == key_len && strncmp(p, key, key_len) == 0) {
-            url_decode(out, out_len, eq + 1, vlen);
-            return true;
-        }
-        p = amp ? amp + 1 : NULL;
-    }
-    if (out_len) {
-        out[0] = '\0';
-    }
-    return false;
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req)
@@ -166,7 +91,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         ".ok{border-left-color:#1f8a70}"
         "</style></head><body>"
         "<h1>Configure Wi‑Fi</h1>"
-        "<p>Connect this stick to your network. SoftAP <b>%s</b> stops after a successful test.</p>",
+        "<p>Connect this device to your network. SoftAP <b>%s</b> stops after a successful test.</p>",
         PROV_SOFTAP_SSID);
 
     if (s_status_msg[0]) {
@@ -176,7 +101,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
                                  strstr(s_status_msg, "timeout") || strstr(s_status_msg, "Timeout"))
                                     ? "msg err"
                                     : "msg";
-        char esc[128];
+        char esc[sizeof(s_status_msg) * 6];
         html_escape(s_status_msg, esc, sizeof(esc));
         used += snprintf(page + used, PROV_HTML_MAX - used, "<div class=\"%s\">%s</div>", cls, esc);
     }
@@ -184,14 +109,14 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     used += snprintf(page + used, PROV_HTML_MAX - used,
         "<form method=\"POST\" action=\"/connect\" id=\"f\">"
         "<label for=\"ssid\">Network (SSID)</label>"
-        "<select name=\"ssid\" id=\"ssid\" required>");
+        "<select name=\"ssid\" id=\"ssid\">");
 
     if (s_scan_count == 0) {
         used += snprintf(page + used, PROV_HTML_MAX - used,
                          "<option value=\"\">(no networks found — use custom)</option>");
     } else {
-        for (int i = 0; i < s_scan_count && used + 96 < PROV_HTML_MAX; i++) {
-            char esc[80];
+        for (int i = 0; i < s_scan_count && used + 2 * CFG_SSID_MAX * 6 + 96 < PROV_HTML_MAX; i++) {
+            char esc[CFG_SSID_MAX * 6];
             html_escape(s_scan[i].ssid, esc, sizeof(esc));
             const char *lock = (s_scan[i].authmode == WIFI_AUTH_OPEN) ? "" : " *";
             used += snprintf(page + used, PROV_HTML_MAX - used,
@@ -256,19 +181,29 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
     }
 
     char body[513];
-    int received = httpd_req_recv(req, body, req->content_len);
-    if (received <= 0) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Recv failed");
-        return ESP_FAIL;
+    size_t received = 0;
+    while (received < req->content_len) {
+        int chunk = httpd_req_recv(req, body + received, req->content_len - received);
+        if (chunk <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Incomplete form");
+            return ESP_FAIL;
+        }
+        received += chunk;
     }
     body[received] = '\0';
-
+    if (memchr(body, 0, received)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid form");
+        return ESP_FAIL;
+    }
     char ssid[CFG_SSID_MAX] = {0};
     char custom[CFG_SSID_MAX] = {0};
     char pass[CFG_PASS_MAX] = {0};
-    form_get(body, "ssid", ssid, sizeof(ssid));
-    form_get(body, "custom", custom, sizeof(custom));
-    form_get(body, "pass", pass, sizeof(pass));
+    if (!form_get(body, "ssid", ssid, sizeof(ssid)) ||
+        !form_get(body, "custom", custom, sizeof(custom)) ||
+        !form_get(body, "pass", pass, sizeof(pass))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or overlong Wi-Fi settings");
+        return ESP_FAIL;
+    }
     if (custom[0]) {
         memcpy(ssid, custom, sizeof(ssid) - 1);
         ssid[sizeof(ssid) - 1] = '\0';
@@ -309,7 +244,13 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
         s_cfg->active = (uint8_t)idx;
         memcpy(s_cfg->profiles[idx].password, pass, CFG_PASS_MAX - 1);
         s_cfg->profiles[idx].password[CFG_PASS_MAX - 1] = '\0';
-        config_save(s_cfg);
+        if (!config_save(s_cfg)) {
+            s_phase = PROV_PHASE_PORTAL;
+            set_status_msg("Failed: settings could not be saved. Please retry.");
+            wifi_mgr_set_state(WIFI_MGR_PROVISIONING);
+            xSemaphoreGive(s_lock);
+            return root_get_handler(req);
+        }
         s_phase = PROV_PHASE_SUCCESS;
         set_status_msg("Connected — saving and closing setup network…");
         xSemaphoreGive(s_lock);
@@ -444,7 +385,7 @@ static esp_err_t start_softap(void)
 
 esp_err_t provisioning_start(bridge_config_t *cfg)
 {
-    if (s_active) {
+    if (s_active || s_phase != PROV_PHASE_IDLE) {
         return ESP_OK;
     }
     if (!cfg) {
@@ -455,6 +396,7 @@ esp_err_t provisioning_start(bridge_config_t *cfg)
     if (!s_lock) {
         s_lock = xSemaphoreCreateMutex();
     }
+    if (!s_lock) return ESP_ERR_NO_MEM;
     s_testing = false;
     s_clients = 0;
     s_phase = PROV_PHASE_SCANNING;
@@ -505,10 +447,8 @@ void provisioning_stop(void)
     }
 
     ESP_LOGI(TAG, "Stopping SoftAP captive portal");
-    s_active = false;
     s_testing = false;
     s_clients = 0;
-    s_phase = PROV_PHASE_IDLE;
 
     if (s_dns) {
         stop_dns_server(s_dns);
@@ -522,6 +462,10 @@ void provisioning_stop(void)
     esp_wifi_disconnect();
     esp_wifi_set_mode(WIFI_MODE_STA);
     wifi_mgr_set_suppress_bridge(false);
+    /* Remain active until HTTP/DNS/AP teardown finishes, so touch cannot
+     * start a second portal during the success worker's asynchronous stop. */
+    s_phase = PROV_PHASE_IDLE;
+    s_active = false;
 }
 
 bool provisioning_is_active(void)

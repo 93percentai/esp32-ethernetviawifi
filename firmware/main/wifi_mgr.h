@@ -41,6 +41,11 @@ void wifi_mgr_get_status(wifi_mgr_status_t *out);
 bool wifi_mgr_is_connected(void);
 const uint8_t *wifi_mgr_sta_mac(void);
 
+#if CONFIG_IDF_TARGET_ESP32S31
+/* Called by the Korvo control task, never from a Wi-Fi/USB callback. */
+esp_err_t wifi_mgr_adopt_mac(const uint8_t mac[6]);
+#endif
+
 /* When true, association events do not toggle the USB NCM link. */
 void wifi_mgr_set_suppress_bridge(bool suppress);
 

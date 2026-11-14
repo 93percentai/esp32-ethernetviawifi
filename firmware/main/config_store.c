@@ -50,6 +50,11 @@ void config_load(bridge_config_t *cfg)
         cfg->active = cfg->profile_count ? 0 : CFG_ACTIVE_NONE;
     }
 
+    for (unsigned i = 0; i < cfg->profile_count; ++i) {
+        cfg->profiles[i].ssid[CFG_SSID_MAX - 1] = '\0';
+        cfg->profiles[i].password[CFG_PASS_MAX - 1] = '\0';
+    }
+
     ESP_LOGI(TAG, "Loaded %u profile(s), active=%u", cfg->profile_count,
              cfg->active == CFG_ACTIVE_NONE ? 255 : cfg->active);
 }

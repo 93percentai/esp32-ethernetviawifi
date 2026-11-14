@@ -2,7 +2,21 @@
 
 ## Cursor Cloud specific instructions
 
-This repo is **ESP-IDF firmware** (LilyGO T-Dongle-S3 USB CDC-NCM ↔ Wi-Fi bridge). There is no Node/Python app server, Docker Compose stack, or npm/pnpm workflow.
+This repo contains **ESP-IDF firmware** for two boards: the LilyGO T-Dongle-S3 USB network gadget (`firmware/`) and the ESP32-S31-Korvo-1 USB Ethernet host bridge (`firmware-korvo/`). There is no Node/Python app server, Docker Compose stack, or npm/pnpm workflow.
+
+### ESP32-S31-Korvo-1
+
+- Use ESP-IDF **v6.1**, tested commit `fff9895c82d744c7237be8847347bdd1b07c6643`.
+- In the prepared workspace source `/workspace/setup/activate-idf61.sh`.
+- From `firmware-korvo/`: `idf.py --preview set-target esp32s31`, then `idf.py --preview build size`.
+- S31 is a RISC-V preview target, distinct from S3. Keep separate build directories and SDK environments.
+- `sh tests/run.sh` runs host checks for ECM descriptors, USB lifecycle, forwarding and provisioning forms with ASan/UBSan.
+- The stock LCD uses the official BSP; its backlight control APIs are unsupported.
+- USB host is installed by this application to provide a configuration-selection callback. Do not also call `bsp_usb_host_start()`.
+- No physical hardware is attached in Cloud. Cross-compilation and mocked host checks do not establish USB, radio, LCD, DHCP or throughput operation.
+- See [docs/KORVO_S31.md](docs/KORVO_S31.md) for adapter requirements and hardware validation.
+
+The notes below apply to the original **LilyGO** build.
 
 ### Toolchain
 

@@ -22,6 +22,8 @@ static bool s_suppress_bridge;
 #define WIFI_SCAN_DONE_BIT   BIT0
 #define WIFI_STA_OK_BIT      BIT1
 #define WIFI_STA_FAIL_BIT    BIT2
+#define WIFI_STA_STOP_BIT    BIT3
+#define WIFI_STA_START_BIT   BIT4
 
 static void update_rssi(void)
 {
@@ -39,8 +41,12 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     (void)base;
 
     switch (id) {
+    case WIFI_EVENT_STA_STOP:
+        xEventGroupSetBits(s_wifi_events, WIFI_STA_STOP_BIT);
+        break;
     case WIFI_EVENT_STA_START:
-        if (s_status.state == WIFI_MGR_PROVISIONING) {
+        xEventGroupSetBits(s_wifi_events, WIFI_STA_START_BIT);
+        if (s_suppress_bridge || s_status.state == WIFI_MGR_PROVISIONING) {
             break;
         }
         s_status.state = WIFI_MGR_CONNECTING;
@@ -56,8 +62,10 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         if (s_status.state != WIFI_MGR_PROVISIONING) {
             s_status.state = WIFI_MGR_CONNECTED;
         }
-        memcpy(s_status.ssid, ev->ssid, sizeof(s_status.ssid));
-        s_status.ssid[sizeof(s_status.ssid) - 1] = '\0';
+        size_t ssid_length = ev->ssid_len;
+        if (ssid_length >= sizeof(s_status.ssid)) ssid_length = sizeof(s_status.ssid) - 1;
+        memcpy(s_status.ssid, ev->ssid, ssid_length);
+        s_status.ssid[ssid_length] = '\0';
         s_status.channel = ev->channel;
         memcpy(s_status.bssid, ev->bssid, 6);
         update_rssi();
@@ -166,7 +174,7 @@ esp_err_t wifi_mgr_apply(const bridge_config_t *cfg)
     }
 
     wifi_config_t wifi_config = {0};
-    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    memcpy(wifi_config.sta.ssid, ssid, strnlen(ssid, sizeof(wifi_config.sta.ssid)));
     strncpy((char *)wifi_config.sta.password, pass, sizeof(wifi_config.sta.password) - 1);
     /* Match pico-usb-wifi: open or WPA2/WPA3-SAE transition */
     if (pass[0]) {
@@ -205,6 +213,34 @@ const uint8_t *wifi_mgr_sta_mac(void)
     return s_sta_mac;
 }
 
+#if CONFIG_IDF_TARGET_ESP32S31
+esp_err_t wifi_mgr_adopt_mac(const uint8_t mac[6])
+{
+    if (!memcmp(mac, s_sta_mac, 6)) return ESP_OK;
+    if (s_suppress_bridge || s_status.state == WIFI_MGR_PROVISIONING) return ESP_ERR_INVALID_STATE;
+    s_suppress_bridge = true;
+    bridge_set_wifi_up(false);
+    xEventGroupClearBits(s_wifi_events, WIFI_STA_STOP_BIT | WIFI_STA_START_BIT);
+    esp_err_t err = esp_wifi_stop();
+    if (err == ESP_OK && !(xEventGroupWaitBits(s_wifi_events, WIFI_STA_STOP_BIT,
+            pdTRUE, pdFALSE, pdMS_TO_TICKS(2000)) & WIFI_STA_STOP_BIT)) err = ESP_ERR_TIMEOUT;
+    if (err == ESP_OK) err = esp_wifi_set_mac(WIFI_IF_STA, mac);
+    if (err == ESP_OK) {
+        memcpy(s_sta_mac, mac, 6);
+        memcpy(s_status.mac, mac, 6);
+    }
+    esp_err_t start_err = esp_wifi_start();
+    if (start_err == ESP_OK && !(xEventGroupWaitBits(s_wifi_events, WIFI_STA_START_BIT,
+            pdTRUE, pdFALSE, pdMS_TO_TICKS(2000)) & WIFI_STA_START_BIT)) start_err = ESP_ERR_TIMEOUT;
+    s_suppress_bridge = false;
+    s_status.state = WIFI_MGR_IDLE;
+    if (start_err != ESP_OK) return start_err;
+    /* Wi-Fi 3-address STA can represent only this one downstream MAC. */
+    esp_err_t connect_err = wifi_mgr_apply(s_cfg);
+    return err != ESP_OK ? err : connect_err;
+}
+#endif
+
 void wifi_mgr_set_suppress_bridge(bool suppress)
 {
     s_suppress_bridge = suppress;
@@ -221,7 +257,7 @@ void wifi_mgr_set_state(wifi_mgr_state_t state)
 static void fill_sta_config(wifi_config_t *wifi_config, const char *ssid, const char *pass)
 {
     memset(wifi_config, 0, sizeof(*wifi_config));
-    strncpy((char *)wifi_config->sta.ssid, ssid, sizeof(wifi_config->sta.ssid) - 1);
+    memcpy(wifi_config->sta.ssid, ssid, strnlen(ssid, sizeof(wifi_config->sta.ssid)));
     if (pass) {
         strncpy((char *)wifi_config->sta.password, pass, sizeof(wifi_config->sta.password) - 1);
     }

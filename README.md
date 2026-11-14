@@ -1,5 +1,21 @@
 # esp32-ethernetviawifi
 
+## ESP32-S31-Korvo-1 + USB Ethernet adapter
+
+A separate **[Korvo firmware build](docs/KORVO_S31.md)** in `firmware-korvo/`
+connects one wired Ethernet device to a Wi-Fi access point using the Korvo's
+USB-A high-speed host port and a **USB CDC ECM Ethernet adapter**. It includes
+the stock 800×480 touchscreen status page and the existing Wi-Fi setup portal.
+The wired device gets its IP from your Wi-Fi router; there is no NAT.
+
+Use **ESP-IDF v6.1**, target **`esp32s31`**, with `idf.py --preview`.
+The adapter must expose CDC ECM in the selected USB configuration and accept
+promiscuous reception. RNDIS, CDC NCM host mode and vendor-only chipsets are
+not implemented. Adapter model/VID:PID and physical-board testing are still
+needed to confirm compatibility. See the guide for building, flashing and checks.
+
+## LilyGO T-Dongle-S3
+
 Driverless USB Wi-Fi adapter firmware for the **LilyGO T-Dongle-S3** (ESP32-S3 + 0.96″ ST7735 LCD).
 
 This is a port of the [pico-usb-wifi](https://gitlab.com/baiyibai/pico-usb-wifi) design to ESP32-S3 USB-OTG: the dongle enumerates as a **USB CDC-NCM** Ethernet gadget, associates to Wi-Fi as a station, and transparently bridges Ethernet frames so the host appears on the AP’s LAN with a single MAC/IP identity.
