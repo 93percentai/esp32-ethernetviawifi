@@ -17,6 +17,9 @@ enum {USB_TRANSFER_STATUS_COMPLETED, USB_TRANSFER_STATUS_CANCELED, USB_TRANSFER_
 #define USB_HOST_CLIENT_EVENT_DEV_GONE 2
 #define USB_HOST_CLIENT_EVENT_DEV_REMOVED 3
 #define USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS 1
+#define USB_HOST_LIB_EVENT_FLAGS_ALL_FREE 2
+typedef struct { int num_devices, num_clients; bool root_port_suspended; } usb_host_lib_info_t;
+esp_err_t usb_host_lib_info(usb_host_lib_info_t *);
 typedef struct { int event; union { struct { uint8_t address; } new_dev; struct { usb_device_handle_t dev_hdl; } dev_gone; struct { uint8_t address; } dev_removed; }; } usb_host_client_event_msg_t;
 typedef struct { int intr_flags; bool (*enum_filter_cb)(const usb_device_desc_t *, uint8_t *); } usb_host_config_t;
 typedef struct { int max_num_event_msg; struct { bool notify_dev_removed; } flags; struct { void (*client_event_callback)(const usb_host_client_event_msg_t *, void *); } async; } usb_host_client_config_t;

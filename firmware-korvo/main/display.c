@@ -51,6 +51,7 @@ static void update(lv_timer_t *timer)
         "Station MAC %02X:%02X:%02X:%02X:%02X:%02X\n"
         "Wi-Fi %s | disconnects %"PRIu32" | last reason %u\n"
         "USB control count/fail %"PRIu32"/%"PRIu32" | resets %"PRIu32" | timeouts %"PRIu32"\n"
+        "Host devices %d | port resets/failures %"PRIu32"/%"PRIu32" | host error %d\n"
         "Last EP0: %02X/%02X value=%04X index=%04X length=%u\n"
         "Last transfer ep=%02X status=%d | submit error=%d\n"
         "USB RX blocks/frames/bad %"PRIu32"/%"PRIu32"/%"PRIu32" | TX blocks %"PRIu32"\n"
@@ -68,6 +69,7 @@ static void update(lv_timer_t *timer)
         usb.adapter_mac[0],usb.adapter_mac[1],usb.adapter_mac[2],usb.adapter_mac[3],usb.adapter_mac[4],usb.adapter_mac[5],
         wifi.mac[0],wifi.mac[1],wifi.mac[2],wifi.mac[3],wifi.mac[4],wifi.mac[5],wifi_state(wifi.state),wifi.disconnects,wifi.last_disconnect_reason,
         usb.control_requests,usb.control_failures,usb.reconfigurations,usb.timeouts,
+        usb.host_devices,usb.port_resets,usb.reset_failures,usb.last_host_error,
         usb.request_type,usb.request,usb.request_value,usb.request_index,usb.request_length,
         usb.last_endpoint,usb.last_transfer_status,usb.last_submit_error,
         usb.rx_transfers,usb.rx_frames,usb.rx_invalid,usb.tx_transfers,usb.queue_high_water,usb.queue_drops,usb.stale_drops,

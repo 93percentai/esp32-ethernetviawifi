@@ -10,6 +10,10 @@ static unsigned received,closed,released,claimed,sent_success,sent_fail,filters,
 static uint8_t receive_order[32];
 static bool bridge_link,stall_control;
 static uint8_t reject_filter_configuration;
+static int host_devices=1;
+static unsigned power_on_attempts;
+static esp_err_t power_on_error,power_off_error;
+static usb_device_desc_t device_desc={.idVendor=0x1234,.idProduct=0x5678,.bcdDevice=0x0100};
 static const uint8_t fixture[]={
     9,2,0,0,2,1,0,0x80,50, 9,4,3,0,1,2,6,0,0,
     5,0x24,6,3,7, 13,0x24,0xf,4,0,0,0,0,0xea,5,0,0,0,
@@ -32,21 +36,28 @@ esp_err_t usb_host_device_close(usb_host_client_handle_t h,usb_device_handle_t d
     ++closed; return ESP_OK;
 }
 esp_err_t usb_host_get_device_descriptor(usb_device_handle_t d,const usb_device_desc_t **out) {
-    (void)d; static usb_device_desc_t dev={.idVendor=0x1234,.idProduct=0x5678,.bcdDevice=0x0100};
-    dev.bNumConfigurations=config_count; *out=&dev; return ESP_OK;
+    (void)d; device_desc.bNumConfigurations=config_count; *out=&device_desc; return ESP_OK;
 }
 esp_err_t usb_host_get_active_config_descriptor(usb_device_handle_t d,const usb_config_desc_t **out) { (void)d; *out=(void *)configs[active_config-1]; return ESP_OK; }
 esp_err_t usb_host_device_info(usb_device_handle_t d,usb_device_info_t *out) { (void)d; out->speed=USB_SPEED_HIGH; out->str_desc_product=NULL; return ESP_OK; }
 esp_err_t usb_host_interface_claim(usb_host_client_handle_t h,usb_device_handle_t d,uint8_t n,uint8_t a) {
-    (void)h; (void)d; assert((n==3 && a==0) || (n==7 && a==2)); ++claimed; return ESP_OK;
+    (void)h; (void)d; assert((n==s_net.endpoints.control_interface && a==0) || (n==s_net.endpoints.data_interface && a==s_net.endpoints.data_alt)); ++claimed; return ESP_OK;
 }
-esp_err_t usb_host_interface_release(usb_host_client_handle_t h,usb_device_handle_t d,uint8_t n) { (void)h; (void)d; assert(n==3 || n==7); ++released; return ESP_OK; }
+esp_err_t usb_host_interface_release(usb_host_client_handle_t h,usb_device_handle_t d,uint8_t n) { (void)h; (void)d; assert(n==s_net.endpoints.control_interface || n==s_net.endpoints.data_interface); ++released; return ESP_OK; }
 esp_err_t usb_host_endpoint_halt(usb_device_handle_t d,uint8_t ep) { (void)d; assert(ep); return ESP_OK; }
 esp_err_t usb_host_endpoint_flush(usb_device_handle_t d,uint8_t ep) { (void)d; assert(ep); return ESP_OK; }
 esp_err_t usb_host_lib_set_root_port_power(bool on) {
-    if(!on) ++resets;
-    else { const usb_device_desc_t *d; usb_host_get_device_descriptor(configs,&d); select_configuration(d,&active_config); }
+    if(!on) { ++resets; return power_off_error; }
+    ++power_on_attempts;
+    /* A downstream NIC close is insufficient: its hub must also be free. */
+    assert(!host_devices && !s_device);
+    if(power_on_error) return power_on_error;
+    const usb_device_desc_t *d; usb_host_get_device_descriptor(configs,&d); select_configuration(d,&active_config);
+    host_devices=1;
     return ESP_OK;
+}
+esp_err_t usb_host_lib_info(usb_host_lib_info_t *info) {
+    *info=(usb_host_lib_info_t){.num_devices=host_devices,.num_clients=1}; return ESP_OK;
 }
 esp_err_t usb_host_client_handle_events(usb_host_client_handle_t h,unsigned ticks) {
     (void)h; clock_us+=(int64_t)ticks*1000;
@@ -65,7 +76,7 @@ esp_err_t usb_host_client_handle_events(usb_host_client_handle_t h,unsigned tick
                 t->actual_num_bytes=8;t->status=3;t->callback(t);return ESP_OK;
             }
             assert(request.bRequest==11 || request.bRequest==0x43 || request.bRequest==0x86);
-            if(request.bRequest==0x43) { assert(request.wValue==15 && request.wIndex==3); ++filters; }
+            if(request.bRequest==0x43) { assert(request.wValue==15 && request.wIndex==s_net.endpoints.control_interface); ++filters; }
         }
         t->actual_num_bytes=n+8; t->status=USB_TRANSFER_STATUS_COMPLETED; t->callback(t);
     }
@@ -88,6 +99,32 @@ static void drain(void) {
     if(s_device) close_device();
     for(int i=0;i<SLOT_COUNT;++i) if(s_slots[i].busy) { s_slots[i].transfer->status=USB_TRANSFER_STATUS_NO_DEVICE; complete(s_slots[i].transfer); }
     if(s_device) close_device();
+}
+static void finish_reset(void) {
+    assert(s_power_cycle && !s_device);
+    unsigned attempts=power_on_attempts;
+    /* Simulate the hub remaining alive after NIC close and a delayed removal
+     * notification (the ordering seen in the hardware capture). */
+    host_devices=1;
+    recover_port(); clock_us+=300000; recover_port();
+    assert(s_power_cycle && power_on_attempts==attempts);
+    const usb_host_client_event_msg_t removed={.event=USB_HOST_CLIENT_EVENT_DEV_REMOVED,.dev_removed={.address=1}};
+    uint8_t selected=s_selection.configuration; uint16_t failed=s_selection.failed;
+    client_event(&removed,NULL);
+    assert(s_selection.configuration==selected && s_selection.failed==failed);
+    const usb_host_client_event_msg_t stale={.event=USB_HOST_CLIENT_EVENT_NEW_DEV,.new_dev={.address=1}};
+    client_event(&stale,NULL); assert(!s_address_count);
+    host_devices=0; recover_port(); clock_us+=300000; recover_port();
+    assert(power_on_attempts==attempts); /* zero devices alone is not ALL_FREE */
+    host_events(USB_HOST_LIB_EVENT_FLAGS_ALL_FREE); recover_port();
+    clock_us+=199000; recover_port(); assert(power_on_attempts==attempts);
+    power_on_error=ESP_ERR_INVALID_STATE;
+    clock_us+=1000; recover_port(); assert(power_on_attempts==attempts+1 && s_power_cycle);
+    clock_us+=99000; recover_port(); assert(power_on_attempts==attempts+1);
+    power_on_error=ESP_OK;
+    clock_us+=1000; recover_port(); assert(!s_power_cycle && power_on_attempts==attempts+2);
+    /* A final old notification cannot erase the cached selection after ON. */
+    client_event(&removed,NULL); assert(s_selection.configuration==selected && s_selection.failed==failed);
 }
 int main(void) {
     config_size=sizeof(fixture); assert(config_size<sizeof(configs[0]));
@@ -118,7 +155,7 @@ int main(void) {
      * It must inspect descriptors first, choose ECM, then re-enumerate once. */
     config_count=3; configs[0][14]=0xff; configs[1][15]=0x0d;
     open_device(1); assert(s_closing && !s_status.ready && resets==1 && s_selection.configuration==3);
-    client_event(&gone,NULL); drain(); assert(active_config==3);
+    client_event(&gone,NULL); drain(); assert(active_config==1); finish_reset(); assert(active_config==3);
     open_device(1); assert(s_status.ready && s_net.driver==USB_NET_ECM && s_status.configuration==3);
     assert(s_status.reconfigurations==1 && filters==2);
     fail("test shutdown"); drain(); assert(!s_device);
@@ -127,7 +164,7 @@ int main(void) {
     reject_filter_configuration=3;
     open_device(1);assert(s_closing && s_selection.configuration==2 && s_status.control_failures==1);
     assert(strstr(s_status.last_error,"EP0"));
-    client_event(&gone,NULL);drain();assert(active_config==2);
+    client_event(&gone,NULL);drain();finish_reset();assert(active_config==2);
     open_device(1);assert(s_status.ready && s_net.driver==USB_NET_NCM && s_parameters.in_max==16384);
     fail("test fallback shutdown");drain();reject_filter_configuration=0;
     assert(s_status.attached && s_selection.failed);
@@ -138,8 +175,45 @@ int main(void) {
      * cancellation, and resets the host port rather than freeing a live URB. */
     config_count=1; active_config=1; configs[0][14]=2; stall_control=true;
     open_device(1); assert(s_closing && s_status.timeouts==1 && s_slots[CONTROL].busy);
-    pending_control=NULL; drain(); assert(!s_device);
+    pending_control=NULL; drain(); assert(!s_device); finish_reset(); stall_control=false;
+    /* Exact RTL8153 identity from the UART report selects ECM on the first
+     * enumeration. Other revisions/counts and manual mode keep their defaults. */
+    device_desc=(usb_device_desc_t){.idVendor=0x0bda,.idProduct=0x8153,.bcdDevice=0x3100,.bNumConfigurations=2};
+    uint8_t selected=0; select_configuration(&device_desc,&selected);
+    assert(selected==(CONFIG_KORVO_USB_AUTO_CONFIGURATION?2:CONFIG_KORVO_USB_CONFIGURATION));
+    device_desc.bcdDevice=0x3000; select_configuration(&device_desc,&selected);
+    assert(selected==(CONFIG_KORVO_USB_AUTO_CONFIGURATION?1:CONFIG_KORVO_USB_CONFIGURATION));
+    device_desc.bcdDevice=0x3100; device_desc.bNumConfigurations=1; select_configuration(&device_desc,&selected);
+    assert(selected==(CONFIG_KORVO_USB_AUTO_CONFIGURATION?1:CONFIG_KORVO_USB_CONFIGURATION));
+#if CONFIG_KORVO_USB_AUTO_CONFIGURATION
+    device_desc.bNumConfigurations=config_count=2;
+    select_configuration(&device_desc,&active_config);
+    const uint8_t realtek_ecm[]={
+        9,2,80,0,2,2,0,0x80,50, 9,4,0,0,1,2,6,0,0,
+        5,0x24,6,0,1, 13,0x24,0xf,4,0,0,0,0,0xea,5,0,0,0,
+        7,5,0x83,3,16,0,8, 9,4,1,0,0,10,0,0,0,
+        9,4,1,1,2,10,0,0,0, 7,5,0x81,2,0,2,0, 7,5,2,2,0,2,0,
+        5,0x24,0,0x10,1,
+    };
+    assert(sizeof(realtek_ecm)==80);
+    memcpy(configs[1],realtek_ecm,sizeof(realtek_ecm));
+    configs[0][14]=0xff;
+    unsigned before=resets;
+    open_device(1);
+    assert(s_status.ready && s_status.vid==0x0bda && s_status.pid==0x8153);
+    assert(s_status.configuration==2 && s_net.driver==USB_NET_ECM && resets==before);
+    assert(s_status.bulk_in==0x81 && s_status.bulk_out==2 && s_status.data_alt==1);
+    receive_submit();
+    reset_port("test hub drain timeout"); drain();
+    host_devices=1; clock_us+=5000001; recover_port();
+    assert(!s_power_cycle && s_status.reset_failures==1 && s_status.last_host_error==ESP_ERR_TIMEOUT);
+    assert(strstr(s_status.stage,"ERROR") && strstr(s_status.detail,"reboot board"));
+#else
+    /* Also exercise host error reporting in the manual-configuration build. */
+    power_off_error=ESP_FAIL; reset_port("test power-off error");
+    assert(!s_power_cycle && s_status.reset_failures==1 && !s_closing);
+#endif
     for(int i=0;i<SLOT_COUNT;++i) { free(s_slots[i].transfer->data_buffer); free(s_slots[i].transfer); }
     free(s_lock); free(s_tx_queue->bytes); free(s_tx_queue);
-    puts("USB configuration discovery, setup, order, queue bounds, hotplug and EP0 timeout passed");
+    puts("USB configuration discovery, RTL8153 first enumeration, hub reset lifecycle, hotplug, queues and timeout passed");
 }

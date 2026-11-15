@@ -25,7 +25,12 @@ configuration. This handles adapters whose default configuration contains only
 vendor interfaces or a driver CD image. No storage is mounted or executed. If
 initialization fails, it tries the next compatible configuration once. USB
 unplug clears the failure history so reconnection can retry. Re-enumeration
-resets the root port and all downstream USB devices.
+resets the root port and all downstream USB devices. The RTL8153 profile
+`0bda:8153`, `bcdDevice=3100` with two configurations selects its advertised
+ECM configuration 2 on initial enumeration, avoiding that reset. For other
+configuration changes, recovery waits for the full device tree (including hubs)
+to be released before restarting; serial and LCD diagnostics report the phase,
+root-port errors and reset failure count.
 
 See [the adapter matrix and troubleshooting guide](USB_ADAPTERS.md) for native
 IDs, protocol limits, firmware options and the difference between software

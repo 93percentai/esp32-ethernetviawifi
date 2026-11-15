@@ -39,7 +39,10 @@ static uint8_t s_probe[CONFIG_DESC_MAX];
 static uint8_t s_addresses[16],s_address_count;
 static uint32_t s_epoch;
 static bool s_closing,s_flushed,s_control_claimed,s_data_claimed,s_power_cycle,s_running,s_seen_link_notification;
-static int64_t s_last_link_poll;
+static int64_t s_last_link_poll,s_reset_started,s_reset_drained_at,s_reset_next_try;
+/* ALL_FREE is published by the host worker only after its pending hub/recovery
+ * work has drained. Closing our NIC alone does not release a parent hub. */
+static uint32_t s_bus_free_generation,s_reset_free_generation;
 static void process_input(void);
 static void close_device(void);
 
@@ -70,13 +73,57 @@ static void fail(const char *message)
 {
     xSemaphoreTake(s_lock,portMAX_DELAY); ++s_status.errors; s_status.ready=false; ++s_epoch;
     snprintf(s_status.last_error,sizeof(s_status.last_error),"%s",message); xSemaphoreGive(s_lock);
-    detail(message); stage("ERROR / reconnect USB"); link_state(false); s_running=false; s_closing=true;
+    detail(message); stage("ERROR / reconnect USB"); link_state(false); s_running=false; s_closing=s_device!=NULL;
+}
+static void reset_failed(esp_err_t err,const char *operation)
+{
+    char message[128];
+    snprintf(message,sizeof(message),"USB reset %s failed: %s; reboot board",operation,esp_err_to_name(err));
+    xSemaphoreTake(s_lock,portMAX_DELAY);
+    ++s_status.reset_failures; s_status.last_host_error=err;
+    xSemaphoreGive(s_lock);
+    s_power_cycle=false; s_address_count=0;
+    fail(message); stage("ERROR / reboot board");
 }
 static void reset_port(const char *reason)
 {
-    detail(reason); s_power_cycle=true; s_closing=true; s_running=false;
-    xSemaphoreTake(s_lock,portMAX_DELAY); s_status.ready=false; ++s_epoch; xSemaphoreGive(s_lock);
-    link_state(false); usb_host_lib_set_root_port_power(false);
+    if(s_power_cycle) return;
+    detail(reason); stage("USB RESET / draining");
+    s_power_cycle=true; s_closing=s_device!=NULL; s_running=false; s_address_count=0;
+    s_reset_started=esp_timer_get_time(); s_reset_drained_at=s_reset_next_try=0;
+    xSemaphoreTake(s_lock,portMAX_DELAY);
+    s_status.attached=s_status.ready=false; ++s_status.port_resets; ++s_epoch;
+    s_reset_free_generation=s_bus_free_generation;
+    xSemaphoreGive(s_lock);
+    link_state(false);
+    esp_err_t err=usb_host_lib_set_root_port_power(false);
+    ESP_LOGI(TAG,"USB root port OFF: %s; waiting for all devices including hubs",esp_err_to_name(err));
+    if(err!=ESP_OK) reset_failed(err,"power off");
+}
+static void recover_port(void)
+{
+    int64_t now=esp_timer_get_time();
+    usb_host_lib_info_t info={0};
+    esp_err_t err=usb_host_lib_info(&info);
+    xSemaphoreTake(s_lock,portMAX_DELAY);
+    bool drained=s_bus_free_generation!=s_reset_free_generation;
+    s_status.host_devices=info.num_devices;
+    xSemaphoreGive(s_lock);
+    if(err!=ESP_OK) { reset_failed(err,"host info"); return; }
+    if(now-s_reset_started>5000000) { reset_failed(ESP_ERR_TIMEOUT,"drain/restart"); return; }
+    if(s_device || !drained || info.num_devices) { s_reset_drained_at=0; return; }
+    if(!s_reset_drained_at) {
+        s_reset_drained_at=now;
+        stage("USB RESET / settling"); detail("USB tree released; allowing disconnect to settle before restart");
+        return;
+    }
+    if(now-s_reset_drained_at<200000 || now<s_reset_next_try) return;
+    err=usb_host_lib_set_root_port_power(true);
+    xSemaphoreTake(s_lock,portMAX_DELAY); s_status.last_host_error=err; xSemaphoreGive(s_lock);
+    ESP_LOGI(TAG,"USB root port ON: %s (devices=%d)",esp_err_to_name(err),info.num_devices);
+    if(err!=ESP_OK) { s_reset_next_try=now+100000; return; }
+    s_power_cycle=false;
+    stage("USB RESET / enumerating"); detail("USB host restarted; waiting for selected configuration");
 }
 static void transfer_error(usb_transfer_t *t,const char *operation)
 {
@@ -159,13 +206,14 @@ static void client_event(const usb_host_client_event_msg_t *event,void *arg)
     (void)arg;
     if(event->event==USB_HOST_CLIENT_EVENT_NEW_DEV) {
         ESP_LOGI(TAG,"USB device enumerated at address %u",event->new_dev.address);
+        if(s_power_cycle) { ESP_LOGI(TAG,"Ignoring old discovery during USB reset"); return; }
         if(s_address_count<sizeof(s_addresses)) s_addresses[s_address_count++]=event->new_dev.address;
         else ESP_LOGW(TAG,"Device discovery queue full");
     } else if(event->event==USB_HOST_CLIENT_EVENT_DEV_REMOVED) {
         /* Failed/unsupported adapters have already been closed, so they do not
          * produce DEV_GONE on a later unplug. Clear failed-config history too. */
         xSemaphoreTake(s_lock,portMAX_DELAY);
-        bool removed=!s_device && s_status.attached && s_status.address==event->dev_removed.address;
+        bool removed=!s_power_cycle && !s_device && s_status.attached && s_status.address==event->dev_removed.address;
         if(removed) { s_status.attached=s_status.ready=false; memset(&s_selection,0,sizeof(s_selection)); }
         xSemaphoreGive(s_lock);
         if(removed) { stage("WAIT / USB-A HS"); detail("USB device removed; reconnect an Ethernet adapter"); }
@@ -376,8 +424,7 @@ static void close_device(void)
     for(int i=0;i<SLOT_COUNT;++i) s_slots[i].done=false;
     packet_t packet;
     while(xQueueReceive(s_tx_queue,&packet,0)==pdTRUE) korvo_bridge_tx_result(false,packet.length);
-    if(s_power_cycle) { s_power_cycle=false; usb_host_lib_set_root_port_power(true); }
-    ESP_LOGI(TAG,"USB resources drained and released; host remains ready for hotplug");
+    ESP_LOGI(TAG,"Adapter resources drained and released%s",s_power_cycle?"; waiting for host/hub teardown":"; host ready for hotplug");
 }
 static void poll_link(void)
 {
@@ -412,7 +459,9 @@ static void usb_task(void *arg)
     (void)arg;
     for(;;) {
         usb_host_client_handle_events(s_client,pdMS_TO_TICKS(10));
-        if(s_closing) { close_device(); continue; }
+        if(s_closing) close_device();
+        if(s_power_cycle) { recover_port(); continue; }
+        if(s_closing) continue;
         if(!s_device && s_address_count) {
             uint8_t address=s_addresses[0]; memmove(s_addresses,s_addresses+1,--s_address_count); open_device(address);
         }
@@ -431,10 +480,22 @@ static void usb_task(void *arg)
         transmit_next();
     }
 }
+static void host_events(uint32_t flags)
+{
+    usb_host_lib_info_t info={0};
+    if(usb_host_lib_info(&info)==ESP_OK) {
+        xSemaphoreTake(s_lock,portMAX_DELAY); s_status.host_devices=info.num_devices; xSemaphoreGive(s_lock);
+    }
+    if(flags&USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+        xSemaphoreTake(s_lock,portMAX_DELAY); ++s_bus_free_generation; xSemaphoreGive(s_lock);
+        ESP_LOGI(TAG,"USB host ALL_FREE: device tree and hub work released");
+    }
+    if(flags&USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) usb_host_device_free_all();
+}
 static void host_task(void *arg)
 {
     (void)arg;
-    for(;;) { uint32_t flags=0; usb_host_lib_handle_events(portMAX_DELAY,&flags); if(flags&USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) usb_host_device_free_all(); }
+    for(;;) { uint32_t flags=0; usb_host_lib_handle_events(portMAX_DELAY,&flags); host_events(flags); }
 }
 static bool select_configuration(const usb_device_desc_t *dev,uint8_t *configuration)
 {
@@ -442,6 +503,12 @@ static bool select_configuration(const usb_device_desc_t *dev,uint8_t *configura
     if(dev->bDeviceClass==9) return true;
     if(!CONFIG_KORVO_USB_AUTO_CONFIGURATION) *configuration=CONFIG_KORVO_USB_CONFIGURATION;
     else {
+        /* This exact RTL8153 profile advertises ECM in configuration 2 in
+         * the user's UART capture. Select it before SET_CONFIGURATION, avoiding
+         * a disruptive root-bus reset (especially behind a hub). Other revisions
+         * still use descriptor discovery; manual configuration takes precedence. */
+        if(dev->idVendor==0x0bda && dev->idProduct==0x8153 &&
+           dev->bcdDevice==0x3100 && dev->bNumConfigurations==2) *configuration=2;
         xSemaphoreTake(s_lock,portMAX_DELAY);
         if(s_selection.vid==dev->idVendor && s_selection.pid==dev->idProduct && s_selection.bcd==dev->bcdDevice && s_selection.configuration) *configuration=s_selection.configuration;
         xSemaphoreGive(s_lock);

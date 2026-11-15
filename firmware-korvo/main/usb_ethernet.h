@@ -12,6 +12,8 @@ typedef struct {
     usb_net_driver_t driver;
     uint8_t control_interface, data_interface, data_alt, bulk_in, bulk_out, notification;
     uint16_t in_mps, out_mps;
+    uint32_t port_resets, reset_failures;
+    int host_devices, last_host_error;
     uint32_t errors, control_requests, control_failures, timeouts, reconfigurations;
     uint32_t rx_transfers, rx_frames, rx_invalid, tx_transfers, queue_drops, stale_drops, queue_high_water;
     uint32_t rx_bytes, tx_bytes, speed_mbps, ntb_in, ntb_out;

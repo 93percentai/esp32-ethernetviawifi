@@ -59,13 +59,22 @@ similar product name.
 ## Configuration discovery and fallback
 
 1. Enumerate configuration 1 and log cached identity/speed/product information.
+   The exact RTL8153 profile `0bda:8153`, `bcdDevice=3100`, two configurations
+   starts directly in configuration 2: the supplied UART capture proves this
+   profile advertises ECM there. Other revisions use normal discovery. The
+   cached fallback choice and explicit manual selection override this preference.
 2. Inspect the active configuration and read the other configuration descriptors
    with standard GET_DESCRIPTOR requests, up to 16 configurations and 4096 bytes
    per descriptor. Log every interface, alternate, endpoint and candidate.
 3. Prefer **ECM → NCM16 → RNDIS → native**, retaining the current configuration
    on equal scores. This favors the simplest supported bridge mode.
 4. If necessary, save the VID/PID/revision/configuration choice, reset the root
-   port, drain pending URBs and re-enumerate with the chosen configuration.
+   port, drain pending URBs and wait for the host's **ALL_FREE** event, including
+   any parent hubs. Allow a 200 ms disconnect interval, check the power-on result
+   and re-enumerate with the chosen configuration. Late removal notifications
+   from the old tree must not erase the saved choice. Restart failures retry at
+   100 ms intervals, with a five-second overall drain/restart deadline; failures
+   show an explicit reboot-board error instead of silently waiting forever.
 5. Claim only the chosen interfaces, initialize the protocol and enable
    promiscuous reception where supported. Native PHY queries configure the MAC
    for the resolved link speed and duplex.
@@ -85,6 +94,7 @@ problem before the adapter driver can run.
 | --- | --- |
 | Nothing enumerates | Logs tab for host enumeration errors; UART from reset; USB-A HS port, board supply, adapter power, a direct connection. Low/full-speed behind a HS hub needs transaction translation absent in this host version. |
 | Native driver not selected | Logged class candidates in every configuration; class mode is preferred. Check exact ID and reported silicon revision. |
+| Adapter identified, then disappears during config switch | Reset stage, host device count, ALL_FREE, root-port OFF/ON return codes and reset failure counter. Adapter close alone does not mean a parent hub has drained. |
 | Configurations keep changing | Fallback log with rejected protocol/configuration and failed EP0 type/code/value/index/status. Each candidate is tried once, not forever. |
 | Filter/control STALL | Driver, last request and `last_error`. Enable control tracing. A driver must receive Ethernet frames addressed to MACs other than the adapter's own. |
 | Cable up, no client learned | USB RX blocks/frames/bad counters. Renew DHCP or trigger ARP from the wired client. Native metadata/FCS must decode before learning can occur. |
@@ -133,7 +143,9 @@ primary upstream implementations and documentation:
   included.
 
 Host tests cover protocol bounds, negotiation, register models, control failures,
-configuration selection/fallback, manual selection, unplug/replug, EP0 timeout,
+configuration selection/fallback, RTL8153 initial ECM selection, manual selection,
+late removal during reset, delayed hub teardown, ALL_FREE/settle ordering,
+power-on retry, drain timeout, power-off failure, unplug/replug, EP0 timeout,
 queue lifetime and malformed aggregates. A hardware campaign should cover at
 least one adapter per native family and each advertised class mode, with cold
 starts, DHCP/ARP/ping, bidirectional traffic and hotplug under load. Record VID:PID,
